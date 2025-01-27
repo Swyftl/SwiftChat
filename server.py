@@ -3,9 +3,18 @@ import threading
 import os
 import sqlite3
 
+# Check if conf.env exists, if not create it
+if not os.path.exists('conf.env'):
+    print("First run detected. Creating configuration file...")
+    with open('conf.env', 'w') as f:
+        f.write("CHATAPP_HOST=127.0.0.1\nCHATAPP_PORT=8080")
+    print("Created conf.env with default settings.")
+    print("Please review the configuration file and restart the server.")
+    exit()
+
 # Load configuration from conf.env
 HOST = os.getenv('CHATAPP_HOST', '127.0.0.1')
-PORT = int(os.getenv('CHATAPP_PORT', 12345))
+PORT = int(os.getenv('CHATAPP_PORT', 8080))
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((HOST, PORT))

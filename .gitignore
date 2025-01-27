@@ -975,3 +975,5 @@ build/server/localpycs/pyimod03_ctypes.pyc
 build/server/localpycs/pyimod04_pywin32.pyc
 build/server/localpycs/struct.pyc
 dist/server.exe
+dist/conf.env
+dist/users.db
