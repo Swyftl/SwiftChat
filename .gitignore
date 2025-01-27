@@ -958,3 +958,4 @@ dist/client/_internal/tcl8/8.4/platform/shell-1.1.4.tm
 dist/client/_internal/tcl8/8.5/msgcat-1.6.1.tm
 dist/client/_internal/tcl8/8.5/tcltest-2.5.8.tm
 dist/client/_internal/tcl8/8.6/http-2.9.8.tm
+dist/client.exe
