@@ -100,6 +100,16 @@ class ServerGUI:
         cursor.execute('''CREATE TABLE IF NOT EXISTS users (
                         username TEXT PRIMARY KEY,
                         password TEXT NOT NULL)''')
+        
+        # Add messages table
+        cursor.execute('''CREATE TABLE IF NOT EXISTS messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sender TEXT NOT NULL,
+                        recipient TEXT,
+                        message TEXT NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        is_private BOOLEAN DEFAULT 0,
+                        FOREIGN KEY (sender) REFERENCES users(username))''')
         conn.commit()
 
         cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
@@ -143,21 +153,38 @@ class ServerGUI:
                 self.log(f"Private message error: {str(e)}")
                 sender_client.send("Error sending private message.".encode('utf-8'))
 
+        def save_message(sender, message, recipient=None, is_private=False):
+            try:
+                cursor.execute("""
+                    INSERT INTO messages (sender, recipient, message, is_private)
+                    VALUES (?, ?, ?, ?)
+                """, (sender, recipient, message, is_private))
+                conn.commit()
+            except Exception as e:
+                self.log(f"Error saving message to database: {str(e)}")
+
         def handle_client(client):
             while True:
                 try:
                     message = client.recv(1024).decode('utf-8')
+                    sender_name = self.nicknames[self.clients.index(client)]  # Get authenticated username
+                    
                     if message == '/online':
                         online_users = ', '.join(self.nicknames)
                         client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
                     elif message.startswith('/pm:'):
                         _, recipient, content = message.split(':', 2)
-                        sender_name = self.nicknames[self.clients.index(client)]
                         self.log(f"PM from {sender_name} to {recipient}: {content}")
                         send_private_message(client, sender_name, recipient, content)
+                        # Save private message
+                        save_message(sender_name, content, recipient, True)
                     else:
-                        broadcast(message.encode('utf-8'))
-                        self.log(f"Message: {message}")
+                        # Handle regular message
+                        content = message.split(':', 1)[1].strip()  # Remove username from message content
+                        broadcast(f"{sender_name}: {content}".encode('utf-8'))
+                        # Save public message with authenticated sender
+                        save_message(sender_name, content)
+                        self.log(f"Message from {sender_name}: {content}")
                 except:
                     index = self.clients.index(client)
                     self.clients.remove(client)
@@ -232,6 +259,28 @@ class ServerGUI:
                 client.send('REG_FAIL'.encode('utf-8'))
                 return None
 
+        def send_message_history(client):
+            try:
+                # Get last 50 public messages
+                cursor.execute("""
+                    SELECT sender, message, timestamp 
+                    FROM messages 
+                    WHERE is_private = 0 
+                    ORDER BY timestamp DESC 
+                    LIMIT 50
+                """)
+                messages = cursor.fetchall()
+                
+                if messages:
+                    client.send('MESSAGE_HISTORY_START'.encode('utf-8'))
+                    # Send messages in chronological order (oldest first)
+                    for sender, message, timestamp in reversed(messages):
+                        history_msg = f"[{timestamp}] {sender}: {message}"
+                        client.send(history_msg.encode('utf-8'))
+                    client.send('MESSAGE_HISTORY_END'.encode('utf-8'))
+            except Exception as e:
+                self.log(f"Error sending message history: {str(e)}")
+
         while True:
             try:
                 client, address = self.server.accept()
@@ -249,6 +298,10 @@ class ServerGUI:
                     self.nicknames.append(username)
                     self.clients.append(client)
                     self.log(f"User authenticated: {username}")
+                    
+                    # Send message history before announcing new user
+                    send_message_history(client)
+                    
                     broadcast(f"{username} joined the chat!".encode('utf-8'))
                     client.send('Connected to the server!'.encode('utf-8'))
                     

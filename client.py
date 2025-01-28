@@ -216,9 +216,24 @@ def create_online_users_window(users_list):
     tk.Button(button_frame, text="Close", command=online_window.destroy).pack(side=tk.RIGHT, padx=5)
 
 def receive():
+    receiving_history = False
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
+            
+            if message == 'MESSAGE_HISTORY_START':
+                receiving_history = True
+                chat_display.config(state=tk.NORMAL)
+                chat_display.insert(tk.END, "=== Chat History ===\n")
+                continue
+            elif message == 'MESSAGE_HISTORY_END':
+                receiving_history = False
+                chat_display.config(state=tk.NORMAL)
+                chat_display.insert(tk.END, "=== End of History ===\n\n")
+                chat_display.config(state=tk.DISABLED)
+                chat_display.yview(tk.END)
+                continue
+            
             if message.startswith('ONLINE_USERS:'):
                 users = message.split(':')[1].split(', ')
                 chat_window.after(0, create_online_users_window, users)
