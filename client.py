@@ -6,10 +6,61 @@ from tkinter import scrolledtext, messagebox
 import webbrowser
 import requests
 from pygame import mixer
+import json
+import hashlib
+import sys
 
 # Version control
 CURRENT_VERSION = "V0.1.4"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+def get_file_hash(filepath):
+    """Calculate SHA-256 hash of a file"""
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, 'rb') as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def verify_and_update_resources():
+    try:
+        def get_folder_contents(path):
+            """Recursively get contents of a GitHub folder"""
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+            response = requests.get(url)
+            if response.status_code != 200:
+                return []
+            return response.json()
+
+        def process_folder(items, base_path=''):
+            for item in items:
+                if item['type'] == 'dir':
+                    # Create local directory if it doesn't exist
+                    local_dir = os.path.join(base_path, item['name'])
+                    os.makedirs(local_dir, exist_ok=True)
+                    # Recursively process subdirectory
+                    sub_items = get_folder_contents(item['path'])
+                    process_folder(sub_items, local_dir)
+                elif item['type'] == 'file':
+                    # Process file
+                    local_path = os.path.join(base_path, item['name'])
+                    local_hash = get_file_hash(local_path)
+                    remote_hash = item['sha']
+
+                    if local_hash != remote_hash:
+                        print(f"Updating resource: {local_path}")
+                        download_url = item['download_url']
+                        file_content = requests.get(download_url).content
+                        with open(local_path, 'wb') as f:
+                            f.write(file_content)
+
+        # Start processing from resources folder
+        contents = get_folder_contents('resources')
+        if contents:
+            os.makedirs('resources', exist_ok=True)
+            process_folder(contents, 'resources')
+
+    except Exception as e:
+        print(f"Error verifying resources: {e}")
 
 def check_for_updates():
     try:
@@ -29,15 +80,26 @@ def check_for_updates():
     except Exception as e:
         print(f"Failed to check for updates: {e}")
 
-# Add update check before connection screen
+# Add resource verification before update check
 if __name__ == "__main__":
+    verify_and_update_resources()
     check_for_updates()
+
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 # Initialize pygame mixer
 mixer.init()
 try:
-    # Use mixer.music instead of Sound for better compatibility
-    mixer.music.load('message_received.mp3')
+    # Use resource_path to get correct path in both dev and bundled environments
+    sound_path = resource_path('resources/sounds/message_received.mp3')
+    mixer.music.load(sound_path)
     sound_enabled = True
 except Exception as e:
     print(f"Could not load notification sound: {e}")
