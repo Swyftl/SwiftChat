@@ -3,24 +3,18 @@ import threading
 import os
 import tkinter as tk
 from tkinter import scrolledtext
-# Remove keyboard import
-import json
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
 PORT = 8080         # Update default port to match server
 client = None
 private_chats = {}  # Store private chat windows: {username: (window, textbox)}
-CREDENTIALS_FILE = 'credentials.json'
+CREDENTIALS_FILE = 'credentials.txt'
 
 def save_credentials(username, password):
-    credentials = {
-        'username': username,
-        'password': password
-    }
     try:
         with open(CREDENTIALS_FILE, 'w') as f:
-            json.dump(credentials, f)
+            f.write(f"{username}\n{password}")
     except Exception as e:
         print(f"Error saving credentials: {e}")
 
@@ -28,7 +22,12 @@ def load_credentials():
     try:
         if os.path.exists(CREDENTIALS_FILE):
             with open(CREDENTIALS_FILE, 'r') as f:
-                return json.load(f)
+                lines = f.readlines()
+                if len(lines) >= 2:
+                    return {
+                        'username': lines[0].strip(),
+                        'password': lines[1].strip()
+                    }
     except Exception as e:
         print(f"Error loading credentials: {e}")
     return None
