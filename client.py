@@ -3,6 +3,7 @@ import threading
 import os
 import tkinter as tk
 from tkinter import scrolledtext
+import keyboard
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
@@ -10,7 +11,7 @@ PORT = 8080         # Update default port to match server
 client = None
 private_chats = {}  # Store private chat windows: {username: (window, textbox)}
 
-def init_connection():
+def init_connection(event=None):  # Add event parameter
     global client, HOST, PORT
     HOST = host_entry.get()
     PORT = int(port_entry.get())
@@ -22,7 +23,7 @@ def init_connection():
     except:
         connection_error_label.config(text="Failed to connect to server")
 
-def register():
+def register(event=None):  # Add event parameter
     global username, password
     username = reg_username_entry.get()
     password = reg_password_entry.get()
@@ -66,13 +67,17 @@ def show_register_screen():
     reg_password_entry = tk.Entry(register_screen, show='*')
     reg_password_entry.pack(padx=20, pady=5)
 
+    # Add Enter key bindings
+    reg_username_entry.bind('<Return>', lambda e: reg_password_entry.focus())
+    reg_password_entry.bind('<Return>', register)
+
     register_button = tk.Button(register_screen, text="Register", command=register)
     register_button.pack(padx=20, pady=20)
 
     reg_error_label = tk.Label(register_screen, text="", fg="red")
     reg_error_label.pack(padx=20, pady=5)
 
-def login():
+def login(event=None):  # Add event parameter
     global username, password
     username = username_entry.get()
     password = password_entry.get()
@@ -126,6 +131,10 @@ def show_login_screen():
     password_entry = tk.Entry(login_screen, show='*')
     password_entry.pack(padx=20, pady=5)
 
+    # Add Enter key bindings
+    username_entry.bind('<Return>', lambda e: password_entry.focus())
+    password_entry.bind('<Return>', login)
+
     login_button = tk.Button(login_screen, text="Login", command=login)
     login_button.pack(padx=20, pady=5)
 
@@ -158,7 +167,7 @@ def create_private_chat(other_user):
     pm_entry = tk.Entry(pm_window, width=40)
     pm_entry.pack(padx=10, pady=(0, 10), fill=tk.X)
     
-    def send_pm():
+    def send_pm(event=None):  # Add event parameter for key binding
         message = pm_entry.get()
         if message:
             client.send(f'/pm:{other_user}:{message}'.encode('utf-8'))
@@ -167,6 +176,9 @@ def create_private_chat(other_user):
     def on_close():
         del private_chats[other_user]
         pm_window.destroy()
+    
+    # Bind Enter key to send message
+    pm_entry.bind('<Return>', send_pm)
     
     # Send button
     tk.Button(pm_window, text="Send", command=send_pm).pack(pady=(0, 10))
@@ -255,10 +267,15 @@ def receive():
             client.close()
             break
 
-def write():
-    message = f'{username}: {message_entry.get()}'
-    client.send(message.encode('utf-8'))
-    message_entry.delete(0, tk.END)
+def write(event=None):  # Add event parameter for key binding
+    message = message_entry.get()
+    if message:  # Don't send empty messages
+        client.send(f'{username}: {message}'.encode('utf-8'))
+        message_entry.delete(0, tk.END)
+
+def handle_enter(e):
+    if message_entry is not None and message_entry.focus_get() == message_entry:
+        write()
 
 def quit_app():
     try:
@@ -301,7 +318,10 @@ def start_chat():
 
     message_entry = tk.Entry(chat_window, width=50)
     message_entry.pack(padx=20, pady=5)
-
+    
+    # Use keyboard module to handle Enter key
+    keyboard.on_press_key('enter', handle_enter)
+    
     send_button = tk.Button(chat_window, text="Send", command=write)
     send_button.pack(padx=20, pady=5)
 
@@ -323,6 +343,10 @@ tk.Label(connection_screen, text="Port:").pack(padx=20, pady=5)
 port_entry = tk.Entry(connection_screen)
 port_entry.insert(0, str(PORT))
 port_entry.pack(padx=20, pady=5)
+
+# Add Enter key binding for connection screen
+host_entry.bind('<Return>', lambda e: port_entry.focus())
+port_entry.bind('<Return>', init_connection)
 
 connect_button = tk.Button(connection_screen, text="Connect", command=init_connection)
 connect_button.pack(padx=20, pady=20)
