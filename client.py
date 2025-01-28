@@ -2,7 +2,35 @@ import socket
 import threading
 import os
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
+import webbrowser
+import requests
+
+# Version control
+CURRENT_VERSION = "V0.1.3"
+GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+def check_for_updates():
+    try:
+        # Get latest release from GitHub
+        response = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+        if response.status_code == 200:
+            latest_version = response.json()["tag_name"].strip("v")
+            if latest_version > CURRENT_VERSION:
+                if messagebox.askyesno(
+                    "Update Available",
+                    f"A new version ({latest_version}) is available!\n"
+                    f"You are currently running version {CURRENT_VERSION}\n\n"
+                    "Would you like to download the update?"
+                ):
+                    webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
+                    os._exit(0)
+    except Exception as e:
+        print(f"Failed to check for updates: {e}")
+
+# Add update check before connection screen
+if __name__ == "__main__":
+    check_for_updates()
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
