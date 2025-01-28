@@ -69,13 +69,15 @@ def play_sound(sound_type='received'):
 HOST = '127.0.0.1'  # Default host
 PORT = 8080         # Update default port to match server
 client = None
-private_chats = {}  # Store private chat windows: {username: (window, textbox)}
+username = None     # Add global username
+password = None     # Add global password
+private_chats = {}  # Store private chat windows
 CREDENTIALS_FILE = 'credentials.txt'
 
-def save_credentials(username, password):
+def save_credentials(username, password, host=None, port=None):
     try:
         with open(CREDENTIALS_FILE, 'w') as f:
-            f.write(f"{username}\n{password}")
+            f.write(f"{username}\n{password}\n{host or HOST}\n{port or PORT}")
     except Exception as e:
         print(f"Error saving credentials: {e}")
 
@@ -84,10 +86,12 @@ def load_credentials():
         if os.path.exists(CREDENTIALS_FILE):
             with open(CREDENTIALS_FILE, 'r') as f:
                 lines = f.readlines()
-                if len(lines) >= 2:
+                if len(lines) >= 4:  # Need 4 lines now: username, password, host, port
                     return {
                         'username': lines[0].strip(),
-                        'password': lines[1].strip()
+                        'password': lines[1].strip(),
+                        'host': lines[2].strip(),
+                        'port': lines[3].strip()
                     }
     except Exception as e:
         print(f"Error loading credentials: {e}")
@@ -102,7 +106,8 @@ def init_connection(event=None):  # Add event parameter
         client.connect((HOST, PORT))
         connection_screen.destroy()
         show_login_screen()
-    except:
+    except Exception as e:
+        print(f"Connection error: {str(e)}")
         connection_error_label.config(text="Failed to connect to server")
 
 def register(event=None):  # Add event parameter
@@ -455,6 +460,15 @@ def start_chat():
 # Initial connection screen setup
 connection_screen = tk.Tk()
 connection_screen.title("ChatApp - Connect to Server")
+
+# Load saved credentials including connection details
+saved_credentials = load_credentials()
+if saved_credentials:
+    HOST = saved_credentials.get('host', HOST)
+    try:
+        PORT = int(saved_credentials.get('port', PORT))
+    except:
+        PORT = 8080
 
 tk.Label(connection_screen, text="Server Address:").pack(padx=20, pady=5)
 host_entry = tk.Entry(connection_screen)
