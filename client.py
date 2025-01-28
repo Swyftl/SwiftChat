@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import webbrowser
 import requests
+from pygame import mixer
 
 # Version control
 CURRENT_VERSION = "V0.1.4"
@@ -31,6 +32,23 @@ def check_for_updates():
 # Add update check before connection screen
 if __name__ == "__main__":
     check_for_updates()
+
+# Initialize pygame mixer
+mixer.init()
+try:
+    # Use mixer.music instead of Sound for better compatibility
+    mixer.music.load('message_received.mp3')
+    sound_enabled = True
+except Exception as e:
+    print(f"Could not load notification sound: {e}")
+    sound_enabled = False
+
+def play_notification():
+    if sound_enabled:
+        try:
+            mixer.music.play()
+        except Exception as e:
+            print(f"Error playing sound: {e}")
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
@@ -308,6 +326,14 @@ def receive():
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
+            
+            # Check if message is from current user before playing sound
+            is_system_message = message.startswith(('MESSAGE_HISTORY', 'ONLINE_USERS:', '==='))
+            is_own_message = message.startswith(f'{username}:') or message.startswith(f'[Private to]')
+            
+            # Only play sound for messages from others
+            if not receiving_history and not is_system_message and not is_own_message:
+                play_notification()
             
             if message == 'MESSAGE_HISTORY_START':
                 receiving_history = True
