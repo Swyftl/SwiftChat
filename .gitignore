@@ -978,3 +978,5 @@ dist/server.exe
 dist/conf.env
 dist/users.db
 logs/server_28012025_003347.log
+dist/logs/server_28012025_003907.log
+dist/logs/server_28012025_003742.log
