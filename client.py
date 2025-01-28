@@ -7,7 +7,7 @@ import webbrowser
 import requests
 
 # Version control
-CURRENT_VERSION = "V0.1.3"
+CURRENT_VERSION = "V0.1.4"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def check_for_updates():
