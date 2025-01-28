@@ -285,32 +285,40 @@ def receive():
             if message == 'MESSAGE_HISTORY_START':
                 receiving_history = True
                 chat_display.config(state=tk.NORMAL)
-                chat_display.insert(tk.END, "=== Chat History ===\n")
+                chat_display.insert(tk.END, "=== Chat History ===\n\n")
+                chat_display.config(state=tk.DISABLED)
                 continue
             elif message == 'MESSAGE_HISTORY_END':
                 receiving_history = False
                 chat_display.config(state=tk.NORMAL)
-                chat_display.insert(tk.END, "=== End of History ===\n\n")
+                chat_display.insert(tk.END, "\n=== End of History ===\n\n")
                 chat_display.config(state=tk.DISABLED)
                 chat_display.yview(tk.END)
                 continue
             
-            if message.startswith('ONLINE_USERS:'):
+            chat_display.config(state=tk.NORMAL)
+            
+            if receiving_history:
+                # Split messages by newline and process each one
+                messages = [msg for msg in message.split('\n') if msg.strip()]
+                for msg in messages:
+                    chat_display.insert(tk.END, f"{msg}\n")  # Add newline after each message
+                if messages:  # Add extra newline between groups of messages
+                    chat_display.insert(tk.END, "\n")
+            elif message.startswith('ONLINE_USERS:'):
                 users = message.split(':')[1].split(', ')
                 chat_window.after(0, create_online_users_window, users)
             elif message.startswith('[Private]'):
-                # Extract sender from "[Private] username: message"
                 sender = message[9:].split(':')[0].strip()
                 chat_window.after(0, update_private_chat, sender, message)
             elif message.startswith('[Private to'):
-                # Message sent by us, update the recipient's chat window
                 recipient = message[11:].split(']')[0].strip()
                 chat_window.after(0, update_private_chat, recipient, message)
             else:
-                chat_display.config(state=tk.NORMAL)
-                chat_display.insert(tk.END, message + '\n')
-                chat_display.config(state=tk.DISABLED)
-                chat_display.yview(tk.END)
+                chat_display.insert(tk.END, f"{message}\n\n")  # Add double newline for regular messages
+            
+            chat_display.config(state=tk.DISABLED)
+            chat_display.yview(tk.END)
         except:
             print("An error occurred!")
             client.close()
