@@ -358,33 +358,48 @@ def create_online_users_window(users_list):
 
 def receive():
     receiving_history = False
+    receiving_pm_history = False
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
             
-            # Handle PM history separately
+            # Handle PM history
             if message.startswith('PM_HISTORY:'):
                 _, user, content = message.split(':', 2)
-                update_private_chat(user, content)
-                continue
-            elif message == 'PM_HISTORY_START':
-                update_private_chat(last_pm_user, message)
-                continue
-            elif message == 'PM_HISTORY_END':
-                update_private_chat(last_pm_user, message)
+                # Split content by newlines
+                if content.strip():
+                    messages = content.split('\n')
+                    for msg in messages:
+                        if msg.strip():
+                            update_private_chat(user, f"{msg.strip()}\n")
                 continue
             
-            # Regular message handling
+            # Handle main chat history and messages
             is_system_message = message.startswith(('MESSAGE_HISTORY', 'ONLINE_USERS:', '==='))
             is_own_message = message.startswith(f'{username}:') or message.startswith(f'[Private to]')
             
-            if not receiving_history and not is_system_message and not is_own_message:
+            if not (receiving_history or receiving_pm_history) and not is_system_message and not is_own_message:
                 play_sound('received')
             
-            # Handle main chat messages
             chat_display.config(state=tk.NORMAL)
             
-            if message.startswith('[Private]'):
+            if message == 'MESSAGE_HISTORY_START':
+                receiving_history = True
+                chat_display.insert(tk.END, "=== Chat History ===\n\n")
+            elif message == 'MESSAGE_HISTORY_END':
+                receiving_history = False
+                chat_display.insert(tk.END, "\n=== End of History ===\n\n")
+            elif receiving_history:
+                # Handle the batch of messages
+                if message.strip():
+                    messages = message.split('\n')
+                    # Process each message in the batch
+                    for msg in messages:
+                        if msg.strip():  # Only process non-empty messages
+                            # Add each message with proper spacing
+                            chat_display.insert(tk.END, f"{msg.strip()}\n\n")
+                    chat_display.see(tk.END)  # Scroll to the latest message
+            elif message.startswith('[Private]'):
                 sender = message[9:].split(':')[0].strip()
                 update_private_chat(sender, message)
             elif message.startswith('[Private to'):
@@ -393,16 +408,8 @@ def receive():
             elif message.startswith('ONLINE_USERS:'):
                 users = message.split(':')[1].split(', ')
                 chat_window.after(0, create_online_users_window, users)
-            elif not (message.startswith('PM_HISTORY') or message.startswith('[Private')):
-                if receiving_history:
-                    # Handle main chat history
-                    messages = [msg for msg in message.split('\n') if msg.strip()]
-                    for msg in messages:
-                        chat_display.insert(tk.END, f"{msg}\n")
-                    if messages:
-                        chat_display.insert(tk.END, "\n")
-                else:
-                    chat_display.insert(tk.END, f"{message}\n\n")
+            else:
+                chat_display.insert(tk.END, f"{message}\n")
             
             chat_display.config(state=tk.DISABLED)
             chat_display.yview(tk.END)

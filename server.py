@@ -5,6 +5,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
+import time
 
 def load_config():
     config = {}
@@ -172,6 +173,9 @@ class ServerGUI:
                     if message == '/online':
                         online_users = ', '.join(self.nicknames)
                         client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
+                    elif message.startswith('/pmhistory:'):
+                        _, other_user = message.split(':', 1)
+                        send_pm_history(client, sender_name, other_user)
                     elif message.startswith('/pm:'):
                         _, recipient, content = message.split(':', 2)
                         self.log(f"PM from {sender_name} to {recipient}: {content}")
@@ -261,11 +265,10 @@ class ServerGUI:
 
         def send_message_history(client):
             try:
-                # Get last 50 public messages
                 cursor.execute("""
                     SELECT sender, message, timestamp 
                     FROM messages 
-                    WHERE is_private = 0 
+                    WHERE recipient IS NULL
                     ORDER BY timestamp DESC 
                     LIMIT 50
                 """)
@@ -273,13 +276,49 @@ class ServerGUI:
                 
                 if messages:
                     client.send('MESSAGE_HISTORY_START'.encode('utf-8'))
-                    # Send messages in chronological order (oldest first)
+                    
+                    # Send all messages with newlines between them
+                    history_messages = []
                     for sender, message, timestamp in reversed(messages):
                         history_msg = f"[{timestamp}] {sender}: {message}"
-                        client.send(history_msg.encode('utf-8'))
+                        history_messages.append(history_msg)
+                    
+                    # Join messages with newlines and send
+                    combined_messages = "\n".join(history_messages)
+                    client.send(combined_messages.encode('utf-8'))
                     client.send('MESSAGE_HISTORY_END'.encode('utf-8'))
             except Exception as e:
                 self.log(f"Error sending message history: {str(e)}")
+
+        def send_pm_history(client, user1, user2):
+            try:
+                cursor.execute("""
+                    SELECT sender, recipient, message, timestamp 
+                    FROM messages 
+                    WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))
+                    ORDER BY timestamp DESC 
+                    LIMIT 50
+                """, (user1, user2, user2, user1))
+                messages = cursor.fetchall()
+                
+                if messages:
+                    client.send('PM_HISTORY_START'.encode('utf-8'))
+                    
+                    # Send all messages with newlines between them
+                    history_messages = []
+                    for sender, recipient, message, timestamp in reversed(messages):
+                        if sender == user1:
+                            history_msg = f"[Private to {recipient}]: {message}"
+                        else:
+                            history_msg = f"[Private] {sender}: {message}"
+                        history_messages.append(history_msg)
+                    
+                    # Join messages with newlines and send
+                    combined_messages = "\n".join(history_messages)
+                    client.send(f"PM_HISTORY:{user2}:{combined_messages}".encode('utf-8'))
+                    client.send('PM_HISTORY_END'.encode('utf-8'))
+            except Exception as e:
+                self.log(f"Error sending PM history: {str(e)}")
 
         while True:
             try:
