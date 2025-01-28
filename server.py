@@ -2,148 +2,263 @@ import socket
 import threading
 import os
 import sqlite3
+import tkinter as tk
+from tkinter import scrolledtext
+from datetime import datetime
 
-# Check if conf.env exists, if not create it
-if not os.path.exists('conf.env'):
-    print("First run detected. Creating configuration file...")
-    with open('conf.env', 'w') as f:
-        f.write("CHATAPP_HOST=127.0.0.1\nCHATAPP_PORT=8080")
-    print("Created conf.env with default settings.")
-    print("Please review the configuration file and restart the server.")
-    exit()
+def load_config():
+    config = {}
+    try:
+        with open('conf.env', 'r') as f:
+            for line in f:
+                if '=' in line:
+                    key, value = line.strip().split('=')
+                    config[key] = value
+    except:
+        config['CHATAPP_HOST'] = '127.0.0.1'
+        config['CHATAPP_PORT'] = '8080'
+    return config
 
-# Load configuration from conf.env
-HOST = os.getenv('CHATAPP_HOST', '127.0.0.1')
-PORT = int(os.getenv('CHATAPP_PORT', 8080))
-
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind((HOST, PORT))
-server.listen()
-
-clients = []
-nicknames = []
-
-# Database setup
-conn = sqlite3.connect('users.db', check_same_thread=False)
-cursor = conn.cursor()
-
-# Create users table if not exists
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    password TEXT NOT NULL)''')
-conn.commit()
-
-# Add test user if not exists
-cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", ('test', 'test123'))
-conn.commit()
-print("Database setup completed")
-
-def broadcast(message):
-    for client in clients:
-        client.send(message)
-
-def handle_client(client):
-    while True:
+class ServerGUI:
+    def __init__(self):
+        # Create logs directory if it doesn't exist
+        if not os.path.exists('logs'):
+            os.makedirs('logs')
+        
+        self.log_contents = []  # Store log messages
+        self.root = tk.Tk()
+        self.root.title("ChatApp Server")
+        self.root.geometry("800x600")
+        
+        # Load configuration
+        self.config = load_config()
+        
+        # Log display
+        self.log_display = scrolledtext.ScrolledText(self.root, state=tk.DISABLED)
+        self.log_display.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
+        
+        # Server status
+        self.status_label = tk.Label(self.root, text="Server Status: Starting...", fg="orange")
+        self.status_label.pack(pady=5)
+        
+        # Start server in separate thread
+        threading.Thread(target=self.run_server, daemon=True).start()
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.mainloop()
+    
+    def log(self, message):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        
+        # Store in memory
+        self.log_contents.append(log_entry)
+        
+        # Display in GUI
+        self.log_display.config(state=tk.NORMAL)
+        self.log_display.insert(tk.END, log_entry + "\n")
+        self.log_display.yview(tk.END)
+        self.log_display.config(state=tk.DISABLED)
+    
+    def save_log(self):
+        timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
+        filename = f"logs/server_{timestamp}.log"
+        
         try:
-            message = client.recv(1024).decode('utf-8')
-            broadcast(message.encode('utf-8'))
+            with open(filename, 'w') as f:
+                f.write("\n".join(self.log_contents))
+            self.log(f"Log saved to {filename}")
+        except Exception as e:
+            self.log(f"Error saving log: {str(e)}")
+    
+    def on_closing(self):
+        self.log("Shutting down server...")
+        self.save_log()
+        try:
+            self.server.close()
         except:
-            index = clients.index(client)
-            clients.remove(client)
-            client.close()
-            nickname = nicknames[index]
-            broadcast(f'{nickname} left the chat!'.encode('utf-8'))
-            nicknames.remove(nickname)
-            break
+            pass
+        self.root.destroy()
+        os._exit(0)
+    
+    def run_server(self):
+        # Check if conf.env exists
+        if not os.path.exists('conf.env'):
+            self.log("First run detected. Creating configuration file...")
+            with open('conf.env', 'w') as f:
+                f.write("CHATAPP_HOST=127.0.0.1\nCHATAPP_PORT=8080")
+            self.log("Created conf.env with default settings.")
+            self.log("Please review the configuration file and restart the server.")
+            self.status_label.config(text="Server Status: Configuration Created", fg="orange")
+            return
 
-def authenticate(client):
-    try:
-        print("Starting authentication process...")
-        
-        # Ask for username
-        client.send('USER'.encode('utf-8'))
-        username = client.recv(1024).decode('utf-8')
-        print(f"Got username: {username}")
-        
-        # Ask for password
-        client.send('PASS'.encode('utf-8'))
-        password = client.recv(1024).decode('utf-8')
-        print(f"Got password for user: {username}")
-        
-        # Check credentials
-        cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-        result = cursor.fetchone()
-        print(f"Database query result: {result}")
-        
-        if result:
-            print(f"User {username} authenticated successfully")
-            client.send('AUTH_SUCCESS'.encode('utf-8'))
-            return username
-        else:
-            print(f"Authentication failed for user {username}")
-            client.send('AUTH_FAIL'.encode('utf-8'))
-            return None
-            
-    except Exception as e:
-        print(f"Authentication error: {str(e)}")
-        return None
+        # Database setup
+        self.log("Setting up database...")
+        conn = sqlite3.connect('users.db', check_same_thread=False)
+        cursor = conn.cursor()
 
-def register_user(client):
-    try:
-        print("Starting registration process...")
-        
-        # Ask for new username
-        client.send('NEW_USER'.encode('utf-8'))
-        username = client.recv(1024).decode('utf-8')
-        print(f"Got new username: {username}")
-        
-        # Check if username exists
-        cursor.execute("SELECT * FROM users WHERE username=?", (username,))
-        if cursor.fetchone():
-            print(f"Username {username} already exists")
-            client.send('USER_EXISTS'.encode('utf-8'))
-            return None
-            
-        # Ask for password
-        client.send('NEW_PASS'.encode('utf-8'))
-        password = client.recv(1024).decode('utf-8')
-        
-        # Add new user
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+                        username TEXT PRIMARY KEY,
+                        password TEXT NOT NULL)''')
         conn.commit()
-        print(f"New user {username} registered successfully")
-        client.send('REG_SUCCESS'.encode('utf-8'))
-        return username
-            
-    except Exception as e:
-        print(f"Registration error: {str(e)}")
-        client.send('REG_FAIL'.encode('utf-8'))
-        return None
 
-def receive():
-    while True:
-        client, address = server.accept()
-        print(f"Connected with {str(address)}")
+        cursor.execute("INSERT OR IGNORE INTO users (username, password) VALUES (?, ?)", 
+                      ('test', 'test123'))
+        conn.commit()
+        self.log("Database setup completed")
 
-        # Receive auth type
-        auth_type = client.recv(1024).decode('utf-8')
+        # Server setup
+        HOST = self.config.get('CHATAPP_HOST', '127.0.0.1')
+        PORT = int(self.config.get('CHATAPP_PORT', '8080'))
         
-        if auth_type == 'LOGIN':
-            username = authenticate(client)
-        elif auth_type == 'REGISTER':
-            username = register_user(client)
-            
-        if username:
-            nicknames.append(username)
-            clients.append(client)
-            print(f"Nickname of the client is {username}")
-            broadcast(f"{username} joined the chat!".encode('utf-8'))
-            client.send('Connected to the server!'.encode('utf-8'))
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind((HOST, PORT))
+        self.server.listen()
+        
+        self.status_label.config(text=f"Server Status: Running on {HOST}:{PORT}", fg="green")
+        self.log(f"Server is listening on {HOST}:{PORT}")
 
-            thread = threading.Thread(target=handle_client, args=(client,))
-            thread.start()
-        else:
-            client.close()
+        self.clients = []
+        self.nicknames = []
 
-print("Server is listening...")
-receive()
+        def broadcast(message):
+            for client in self.clients:
+                client.send(message)
+
+        def send_private_message(sender_client, sender_name, recipient, message):
+            try:
+                if recipient in self.nicknames:
+                    recipient_index = self.nicknames.index(recipient)
+                    recipient_client = self.clients[recipient_index]
+                    
+                    # Send to recipient
+                    private_msg = f"[Private] {sender_name}: {message}"
+                    recipient_client.send(private_msg.encode('utf-8'))
+                    
+                    # Send confirmation to sender
+                    sender_client.send(f"[Private to {recipient}]: {message}".encode('utf-8'))
+                else:
+                    sender_client.send(f"Error: User {recipient} is not online.".encode('utf-8'))
+            except Exception as e:
+                self.log(f"Private message error: {str(e)}")
+                sender_client.send("Error sending private message.".encode('utf-8'))
+
+        def handle_client(client):
+            while True:
+                try:
+                    message = client.recv(1024).decode('utf-8')
+                    if message == '/online':
+                        online_users = ', '.join(self.nicknames)
+                        client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
+                    elif message.startswith('/pm:'):
+                        _, recipient, content = message.split(':', 2)
+                        sender_name = self.nicknames[self.clients.index(client)]
+                        self.log(f"PM from {sender_name} to {recipient}: {content}")
+                        send_private_message(client, sender_name, recipient, content)
+                    else:
+                        broadcast(message.encode('utf-8'))
+                        self.log(f"Message: {message}")
+                except:
+                    index = self.clients.index(client)
+                    self.clients.remove(client)
+                    client.close()
+                    nickname = self.nicknames[index]
+                    self.log(f"User disconnected: {nickname}")
+                    broadcast(f'{nickname} left the chat!'.encode('utf-8'))
+                    self.nicknames.remove(nickname)
+                    break
+
+        def authenticate(client):
+            try:
+                self.log("Starting authentication process...")
+                
+                # Ask for username
+                client.send('USER'.encode('utf-8'))
+                username = client.recv(1024).decode('utf-8')
+                self.log(f"Got username: {username}")
+                
+                # Ask for password
+                client.send('PASS'.encode('utf-8'))
+                password = client.recv(1024).decode('utf-8')
+                self.log(f"Got password for user: {username}")
+                
+                # Check credentials
+                cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+                result = cursor.fetchone()
+                self.log(f"Database query result: {result}")
+                
+                if result:
+                    self.log(f"User {username} authenticated successfully")
+                    client.send('AUTH_SUCCESS'.encode('utf-8'))
+                    return username
+                else:
+                    self.log(f"Authentication failed for user {username}")
+                    client.send('AUTH_FAIL'.encode('utf-8'))
+                    return None
+                    
+            except Exception as e:
+                self.log(f"Authentication error: {str(e)}")
+                return None
+
+        def register_user(client):
+            try:
+                self.log("Starting registration process...")
+                
+                # Ask for new username
+                client.send('NEW_USER'.encode('utf-8'))
+                username = client.recv(1024).decode('utf-8')
+                self.log(f"Got new username: {username}")
+                
+                # Check if username exists
+                cursor.execute("SELECT * FROM users WHERE username=?", (username,))
+                if cursor.fetchone():
+                    self.log(f"Username {username} already exists")
+                    client.send('USER_EXISTS'.encode('utf-8'))
+                    return None
+                    
+                # Ask for password
+                client.send('NEW_PASS'.encode('utf-8'))
+                password = client.recv(1024).decode('utf-8')
+                
+                # Add new user
+                cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+                conn.commit()
+                self.log(f"New user {username} registered successfully")
+                client.send('REG_SUCCESS'.encode('utf-8'))
+                return username
+                    
+            except Exception as e:
+                self.log(f"Registration error: {str(e)}")
+                client.send('REG_FAIL'.encode('utf-8'))
+                return None
+
+        while True:
+            try:
+                client, address = self.server.accept()
+                self.log(f"New connection from {address}")
+
+                auth_type = client.recv(1024).decode('utf-8')
+                if auth_type == 'LOGIN':
+                    self.log(f"Login attempt from {address}")
+                    username = authenticate(client)
+                elif auth_type == 'REGISTER':
+                    self.log(f"Registration attempt from {address}")
+                    username = register_user(client)
+
+                if username:
+                    self.nicknames.append(username)
+                    self.clients.append(client)
+                    self.log(f"User authenticated: {username}")
+                    broadcast(f"{username} joined the chat!".encode('utf-8'))
+                    client.send('Connected to the server!'.encode('utf-8'))
+                    
+                    thread = threading.Thread(target=handle_client, args=(client,))
+                    thread.start()
+                else:
+                    self.log(f"Authentication failed from {address}")
+                    client.close()
+            except Exception as e:
+                self.log(f"Error: {str(e)}")
+
+if __name__ == "__main__":
+    ServerGUI()

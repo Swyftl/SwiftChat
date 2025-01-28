@@ -6,8 +6,9 @@ from tkinter import scrolledtext
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
-PORT = 12345        # Default port
+PORT = 8080         # Update default port to match server
 client = None
+private_chats = {}  # Store private chat windows: {username: (window, textbox)}
 
 def init_connection():
     global client, HOST, PORT
@@ -136,14 +137,104 @@ def show_login_screen():
 
     login_screen.mainloop()
 
+def show_online_users():
+    client.send('/online'.encode('utf-8'))
+
+def create_private_chat(other_user):
+    if (other_user in private_chats):
+        private_chats[other_user][0].lift()  # Bring existing window to front
+        return
+        
+    # Create new private chat window
+    pm_window = tk.Toplevel(chat_window)
+    pm_window.title(f"Chat with {other_user}")
+    pm_window.geometry("400x500")
+    
+    # Chat display
+    pm_display = scrolledtext.ScrolledText(pm_window, state=tk.DISABLED)
+    pm_display.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    
+    # Message entry
+    pm_entry = tk.Entry(pm_window, width=40)
+    pm_entry.pack(padx=10, pady=(0, 10), fill=tk.X)
+    
+    def send_pm():
+        message = pm_entry.get()
+        if message:
+            client.send(f'/pm:{other_user}:{message}'.encode('utf-8'))
+            pm_entry.delete(0, tk.END)
+    
+    def on_close():
+        del private_chats[other_user]
+        pm_window.destroy()
+    
+    # Send button
+    tk.Button(pm_window, text="Send", command=send_pm).pack(pady=(0, 10))
+    
+    pm_window.protocol("WM_DELETE_WINDOW", on_close)
+    private_chats[other_user] = (pm_window, pm_display)
+
+def update_private_chat(sender, message):
+    if sender in private_chats:
+        window, display = private_chats[sender]
+        display.config(state=tk.NORMAL)
+        display.insert(tk.END, f"{message}\n")
+        display.config(state=tk.DISABLED)
+        display.yview(tk.END)
+    else:
+        create_private_chat(sender)
+        update_private_chat(sender, message)
+
+def send_private_message(recipient):
+    create_private_chat(recipient)
+
+def create_online_users_window(users_list):
+    online_window = tk.Toplevel(chat_window)
+    online_window.title("Online Users")
+    online_window.geometry("200x300")
+    
+    # Create a listbox to display users
+    users_listbox = tk.Listbox(online_window)
+    users_listbox.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    
+    # Add users to listbox, excluding current user
+    for user in users_list:
+        if user != username:  # Only add other users
+            users_listbox.insert(tk.END, user)
+    
+    def on_user_select():
+        selection = users_listbox.curselection()
+        if selection:
+            selected_user = users_listbox.get(selection[0])
+            send_private_message(selected_user)  # No need to check for self, as we filtered the list
+    
+    # Buttons frame
+    button_frame = tk.Frame(online_window)
+    button_frame.pack(fill=tk.X, padx=10, pady=5)
+    
+    tk.Button(button_frame, text="Message", command=on_user_select).pack(side=tk.LEFT, padx=5)
+    tk.Button(button_frame, text="Close", command=online_window.destroy).pack(side=tk.RIGHT, padx=5)
+
 def receive():
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
-            chat_display.config(state=tk.NORMAL)
-            chat_display.insert(tk.END, message + '\n')
-            chat_display.config(state=tk.DISABLED)
-            chat_display.yview(tk.END)
+            if message.startswith('ONLINE_USERS:'):
+                users = message.split(':')[1].split(', ')
+                chat_window.after(0, create_online_users_window, users)
+            elif message.startswith('[Private]'):
+                # Extract sender from "[Private] username: message"
+                sender = message[9:].split(':')[0].strip()
+                chat_window.after(0, update_private_chat, sender, message)
+            elif message.startswith('[Private to'):
+                # Message sent by us, update the recipient's chat window
+                recipient = message[11:].split(']')[0].strip()
+                chat_window.after(0, update_private_chat, recipient, message)
+            else:
+                chat_display.config(state=tk.NORMAL)
+                chat_display.insert(tk.END, message + '\n')
+                chat_display.config(state=tk.DISABLED)
+                chat_display.yview(tk.END)
         except:
             print("An error occurred!")
             client.close()
@@ -155,19 +246,39 @@ def write():
     message_entry.delete(0, tk.END)
 
 def quit_app():
-    client.close()
-    chat_window.quit()
+    try:
+        # Close all private chat windows
+        for window, _ in private_chats.values():
+            window.destroy()
+        
+        # Close socket and main window
+        client.close()
+        chat_window.destroy()
+        
+        # Force quit the application
+        os._exit(0)
+    except:
+        os._exit(0)
 
 def start_chat():
     global chat_display, message_entry, chat_window
     chat_window = tk.Tk()
     chat_window.title("ChatApp")
-
+    
+    # Add window close handler
+    chat_window.protocol("WM_DELETE_WINDOW", quit_app)
+    
     # Toolbar setup
     menubar = tk.Menu(chat_window)
+    
     file_menu = tk.Menu(menubar, tearoff=0)
     file_menu.add_command(label="Quit", command=quit_app)
     menubar.add_cascade(label="File", menu=file_menu)
+    
+    view_menu = tk.Menu(menubar, tearoff=0)
+    view_menu.add_command(label="Show Online Users", command=show_online_users)
+    menubar.add_cascade(label="View", menu=view_menu)
+    
     chat_window.config(menu=menubar)
 
     chat_display = scrolledtext.ScrolledText(chat_window, state=tk.DISABLED)

@@ -977,3 +977,4 @@ build/server/localpycs/struct.pyc
 dist/server.exe
 dist/conf.env
 dist/users.db
+logs/server_28012025_003347.log
