@@ -73,6 +73,7 @@ username = None     # Add global username
 password = None     # Add global password
 private_chats = {}  # Store private chat windows
 CREDENTIALS_FILE = 'credentials.txt'
+last_pm_user = None  # To track which PM window should receive history
 
 def save_credentials(username, password, host=None, port=None):
     try:
@@ -264,6 +265,9 @@ def show_online_users():
     client.send('/online'.encode('utf-8'))
 
 def create_private_chat(other_user):
+    global last_pm_user  # Add this at the start of the function
+    last_pm_user = other_user  # Store the user for history handling
+    
     if (other_user in private_chats):
         private_chats[other_user][0].lift()  # Bring existing window to front
         return
@@ -276,6 +280,9 @@ def create_private_chat(other_user):
     # Chat display
     pm_display = scrolledtext.ScrolledText(pm_window, state=tk.DISABLED)
     pm_display.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+    
+    # Request chat history when creating new PM window
+    client.send(f'/pmhistory:{other_user}'.encode('utf-8'))
     
     # Message entry
     pm_entry = tk.Entry(pm_window, width=40)
@@ -304,7 +311,15 @@ def update_private_chat(sender, message):
     if sender in private_chats:
         window, display = private_chats[sender]
         display.config(state=tk.NORMAL)
-        display.insert(tk.END, f"{message}\n")
+        
+        # Handle history markers for private messages
+        if message == 'PM_HISTORY_START':
+            display.insert(tk.END, "=== Private Message History ===\n\n")
+        elif message == 'PM_HISTORY_END':
+            display.insert(tk.END, "\n=== End of Private History ===\n\n")
+        else:
+            display.insert(tk.END, f"{message}\n")
+        
         display.config(state=tk.DISABLED)
         display.yview(tk.END)
     else:
@@ -347,53 +362,53 @@ def receive():
         try:
             message = client.recv(1024).decode('utf-8')
             
-            # Check if message is from current user before playing sound
+            # Handle PM history separately
+            if message.startswith('PM_HISTORY:'):
+                _, user, content = message.split(':', 2)
+                update_private_chat(user, content)
+                continue
+            elif message == 'PM_HISTORY_START':
+                update_private_chat(last_pm_user, message)
+                continue
+            elif message == 'PM_HISTORY_END':
+                update_private_chat(last_pm_user, message)
+                continue
+            
+            # Regular message handling
             is_system_message = message.startswith(('MESSAGE_HISTORY', 'ONLINE_USERS:', '==='))
             is_own_message = message.startswith(f'{username}:') or message.startswith(f'[Private to]')
             
-            # Only play sound for messages from others
             if not receiving_history and not is_system_message and not is_own_message:
-                play_sound('received')  # Play received sound
+                play_sound('received')
             
-            if message == 'MESSAGE_HISTORY_START':
-                receiving_history = True
-                chat_display.config(state=tk.NORMAL)
-                chat_display.insert(tk.END, "=== Chat History ===\n\n")
-                chat_display.config(state=tk.DISABLED)
-                continue
-            elif message == 'MESSAGE_HISTORY_END':
-                receiving_history = False
-                chat_display.config(state=tk.NORMAL)
-                chat_display.insert(tk.END, "\n=== End of History ===\n\n")
-                chat_display.config(state=tk.DISABLED)
-                chat_display.yview(tk.END)
-                continue
-            
+            # Handle main chat messages
             chat_display.config(state=tk.NORMAL)
             
-            if receiving_history:
-                # Split messages by newline and process each one
-                messages = [msg for msg in message.split('\n') if msg.strip()]
-                for msg in messages:
-                    chat_display.insert(tk.END, f"{msg}\n")  # Add newline after each message
-                if messages:  # Add extra newline between groups of messages
-                    chat_display.insert(tk.END, "\n")
+            if message.startswith('[Private]'):
+                sender = message[9:].split(':')[0].strip()
+                update_private_chat(sender, message)
+            elif message.startswith('[Private to'):
+                recipient = message[11:].split(']')[0].strip()
+                update_private_chat(recipient, message)
             elif message.startswith('ONLINE_USERS:'):
                 users = message.split(':')[1].split(', ')
                 chat_window.after(0, create_online_users_window, users)
-            elif message.startswith('[Private]'):
-                sender = message[9:].split(':')[0].strip()
-                chat_window.after(0, update_private_chat, sender, message)
-            elif message.startswith('[Private to'):
-                recipient = message[11:].split(']')[0].strip()
-                chat_window.after(0, update_private_chat, recipient, message)
-            else:
-                chat_display.insert(tk.END, f"{message}\n\n")  # Add double newline for regular messages
+            elif not (message.startswith('PM_HISTORY') or message.startswith('[Private')):
+                if receiving_history:
+                    # Handle main chat history
+                    messages = [msg for msg in message.split('\n') if msg.strip()]
+                    for msg in messages:
+                        chat_display.insert(tk.END, f"{msg}\n")
+                    if messages:
+                        chat_display.insert(tk.END, "\n")
+                else:
+                    chat_display.insert(tk.END, f"{message}\n\n")
             
             chat_display.config(state=tk.DISABLED)
             chat_display.yview(tk.END)
-        except:
-            print("An error occurred!")
+            
+        except Exception as e:
+            print(f"Receive error: {str(e)}")
             client.close()
             break
 
