@@ -3,13 +3,35 @@ import threading
 import os
 import tkinter as tk
 from tkinter import scrolledtext
-import keyboard
+# Remove keyboard import
+import json
 
 # Global variables
 HOST = '127.0.0.1'  # Default host
 PORT = 8080         # Update default port to match server
 client = None
 private_chats = {}  # Store private chat windows: {username: (window, textbox)}
+CREDENTIALS_FILE = 'credentials.json'
+
+def save_credentials(username, password):
+    credentials = {
+        'username': username,
+        'password': password
+    }
+    try:
+        with open(CREDENTIALS_FILE, 'w') as f:
+            json.dump(credentials, f)
+    except Exception as e:
+        print(f"Error saving credentials: {e}")
+
+def load_credentials():
+    try:
+        if os.path.exists(CREDENTIALS_FILE):
+            with open(CREDENTIALS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading credentials: {e}")
+    return None
 
 def init_connection(event=None):  # Add event parameter
     global client, HOST, PORT
@@ -77,12 +99,27 @@ def show_register_screen():
     reg_error_label = tk.Label(register_screen, text="", fg="red")
     reg_error_label.pack(padx=20, pady=5)
 
+def reconnect_to_server():
+    global client
+    try:
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect((HOST, PORT))
+        return True
+    except Exception as e:
+        print(f"Reconnection error: {str(e)}")
+        return False
+
 def login(event=None):  # Add event parameter
     global username, password
     username = username_entry.get()
     password = password_entry.get()
     
     try:
+        if not client or client._closed:
+            if not reconnect_to_server():
+                error_label.config(text="Cannot connect to server")
+                return
+
         print(f"Attempting to log in as {username}")
         client.send('LOGIN'.encode('utf-8'))
         # Wait for initial USER request from server
@@ -109,14 +146,20 @@ def login(event=None):  # Add event parameter
                 
                 if response == 'AUTH_SUCCESS':
                     print("Login successful!")
+                    # Save credentials after successful login
+                    save_credentials(username, password)
                     login_screen.destroy()
                     start_chat()
                     return
         
         error_label.config(text="Authentication Failed. Try again.")
+        # Reconnect for next attempt
+        reconnect_to_server()
     except Exception as e:
         print(f"Login error: {str(e)}")
         error_label.config(text=f"Connection error: {str(e)}")
+        # Attempt to reconnect after error
+        reconnect_to_server()
 
 def show_login_screen():
     global login_screen, username_entry, password_entry, error_label
@@ -130,6 +173,12 @@ def show_login_screen():
     tk.Label(login_screen, text="Password:").pack(padx=20, pady=5)
     password_entry = tk.Entry(login_screen, show='*')
     password_entry.pack(padx=20, pady=5)
+
+    # Load and fill saved credentials
+    saved_credentials = load_credentials()
+    if saved_credentials:
+        username_entry.insert(0, saved_credentials.get('username', ''))
+        password_entry.insert(0, saved_credentials.get('password', ''))
 
     # Add Enter key bindings
     username_entry.bind('<Return>', lambda e: password_entry.focus())
@@ -273,10 +322,6 @@ def write(event=None):  # Add event parameter for key binding
         client.send(f'{username}: {message}'.encode('utf-8'))
         message_entry.delete(0, tk.END)
 
-def handle_enter(e):
-    if message_entry is not None and message_entry.focus_get() == message_entry:
-        write()
-
 def quit_app():
     try:
         # Close all private chat windows
@@ -319,8 +364,8 @@ def start_chat():
     message_entry = tk.Entry(chat_window, width=50)
     message_entry.pack(padx=20, pady=5)
     
-    # Use keyboard module to handle Enter key
-    keyboard.on_press_key('enter', handle_enter)
+    # Replace keyboard module with Tkinter binding
+    message_entry.bind('<Return>', write)
     
     send_button = tk.Button(chat_window, text="Send", command=write)
     send_button.pack(padx=20, pady=5)
