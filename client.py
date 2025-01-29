@@ -7,28 +7,118 @@ import webbrowser
 import requests
 from pygame import mixer
 import sys
+import subprocess
+import time
 
 # Version control
-CURRENT_VERSION = "V0.1.4"
+CURRENT_VERSION = "V0.1.3"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+def is_running_as_exe():
+    """Check if we're running as a bundled exe"""
+    return getattr(sys, 'frozen', False)
+
+def download_and_replace_exe(download_url):
+    """Download new version and replace current exe"""
+    try:
+        if not is_running_as_exe():
+            print("Not running as exe, skipping auto-update")
+            return False
+            
+        current_exe = sys.executable
+        temp_exe = current_exe + ".new"
+        batch_path = os.path.join(os.path.dirname(current_exe), "update.bat")
+        
+        print(f"Downloading update from: {download_url}")
+        print(f"Current exe: {current_exe}")
+        print(f"Temp exe: {temp_exe}")
+        
+        # Download new version
+        response = requests.get(download_url, stream=True)
+        if response.status_code != 200:
+            print(f"Download failed with status code: {response.status_code}")
+            return False
+            
+        # Save new version to temp file
+        with open(temp_exe, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        print("Download complete, creating update script")
+        
+        # Create batch file with explicit commands
+        batch_content = f"""@echo off
+echo Updating SwiftChat...
+timeout /t 2 /nobreak
+taskkill /F /IM "{os.path.basename(current_exe)}" /T
+echo Moving files...
+move /Y "{temp_exe}" "{current_exe}"
+echo Starting new version...
+start "" "{current_exe}"
+echo Cleaning up...
+(goto) 2>nul & del "%~f0"
+"""
+        
+        with open(batch_path, 'w') as f:
+            f.write(batch_content)
+        
+        print("Starting update script")
+        # Start batch file with high priority and wait
+        subprocess.Popen(
+            ['cmd', '/c', batch_path], 
+            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.HIGH_PRIORITY_CLASS,
+            cwd=os.path.dirname(current_exe)
+        )
+        return True
+        
+    except Exception as e:
+        print(f"Update error: {e}")
+        messagebox.showerror("Update Error", f"Failed to update: {str(e)}")
+        return False
 
 def check_for_updates():
     try:
-        # Get latest release from GitHub
+        print("Checking for updates...")
         response = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
         if response.status_code == 200:
-            latest_version = response.json()["tag_name"].strip("v")
+            latest_release = response.json()
+            latest_version = latest_release["tag_name"].strip("v")
+            
+            print(f"Current version: {CURRENT_VERSION}")
+            print(f"Latest version: {latest_version}")
+            
             if latest_version > CURRENT_VERSION:
                 if messagebox.askyesno(
                     "Update Available",
                     f"A new version ({latest_version}) is available!\n"
                     f"You are currently running version {CURRENT_VERSION}\n\n"
-                    "Would you like to download the update?"
+                    "Would you like to download and install the update?"
                 ):
-                    webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
-                    os._exit(0)
+                    if is_running_as_exe():
+                        # Find SwiftChat.exe in assets
+                        for asset in latest_release['assets']:
+                            if asset['name'].lower() == 'swiftchat.exe':
+                                print(f"Found update asset: {asset['name']}")
+                                if download_and_replace_exe(asset['browser_download_url']):
+                                    messagebox.showinfo("Update", 
+                                        "Update downloaded successfully!\n"
+                                        "The application will now restart.")
+                                    time.sleep(1)  # Give time for message to be seen
+                                    os._exit(0)
+                                else:
+                                    messagebox.showerror("Update Failed",
+                                        "Failed to download update.\n"
+                                        "Please try again later or download manually.")
+                                break
+                        else:
+                            print("No SwiftChat.exe found in release assets")
+                            webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
+                    else:
+                        print("Not running as exe, opening browser")
+                        webbrowser.open(f"https://github.com/{GITHUB_REPO}/releases/latest")
+                    
     except Exception as e:
-        print(f"Failed to check for updates: {e}")
+        print(f"Update check failed: {e}")
 
 # Add update check before starting
 if __name__ == "__main__":
