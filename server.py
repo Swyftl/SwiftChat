@@ -196,11 +196,91 @@ class ServerGUI:
                 return None
 
         def handle_client(client):
+            try:
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except:
+                pass
+                
             while True:
                 try:
                     message = client.recv(1024).decode('utf-8')
                     sender_name = self.nicknames[self.clients.index(client)]
                     
+                    if message == 'PING':
+                        client.send('PONG'.encode('utf-8'))
+                        continue
+                        
+                    if message == 'IMAGE_START':  # This is the initial request for image upload
+                        self.log(f"Starting image receive from {sender_name}")
+                        try:
+                            # No timeout for initial handshake
+                            client.settimeout(None)
+                            
+                            # Send ready signal immediately
+                            client.send('READY_FOR_IMAGE'.encode('utf-8'))
+                            
+                            # Wait for size info
+                            size_info = client.recv(1024).decode('utf-8')
+                            if not size_info.startswith('SIZE:'):
+                                raise Exception("No size info received")
+                            
+                            # Extract size and verify it's reasonable
+                            total_size = int(size_info.split(':')[1])
+                            if total_size > 256 * 1024:  # Match client's 256KB limit
+                                raise Exception("Image too large")
+                            
+                            client.send('SIZE_OK'.encode('utf-8'))
+                            
+                            # Initialize image data collection
+                            image_data = []
+                            received_size = 0
+                            last_progress_log = time.time()
+                            start_time = time.time()
+                            
+                            while True:
+                                if time.time() - start_time > 60:  # Longer total timeout (60 seconds)
+                                    raise Exception("Transfer took too long")
+                                
+                                chunk = client.recv(256).decode('utf-8')  # Match client's chunk size
+                                if chunk == 'END_IMAGE':
+                                    break
+                                
+                                image_data.append(chunk)
+                                received_size += len(chunk)
+                                
+                                # Log progress every 2 seconds
+                                current_time = time.time()
+                                if current_time - last_progress_log >= 2.0:
+                                    self.log(f"Received {received_size}/{total_size} bytes")
+                                    last_progress_log = current_time
+                            
+                            if received_size >= total_size:
+                                # Broadcast with smaller chunks
+                                full_image = ''.join(image_data)
+                                broadcast(f"IMAGE_START:{sender_name}".encode('utf-8'))
+                                
+                                chunk_size = 256  # Match client's chunk size
+                                for i in range(0, len(full_image), chunk_size):
+                                    broadcast(full_image[i:i+chunk_size].encode('utf-8'))
+                                    time.sleep(0.01)  # Minimal delay between chunks
+                                
+                                broadcast('END_IMAGE'.encode('utf-8'))
+                                client.send('IMAGE_RECEIVED'.encode('utf-8'))
+                                self.log(f"Image from {sender_name} forwarded successfully")
+                            else:
+                                raise Exception(f"Incomplete transfer: {received_size}/{total_size} bytes")
+                            
+                        except Exception as e:
+                            self.log(f"Error handling image from {sender_name}: {e}")
+                            try:
+                                client.send('IMAGE_ERROR'.encode('utf-8'))
+                            except:
+                                pass
+                        finally:
+                            client.settimeout(None)
+                        continue
+
                     if message == '/online':
                         online_users = ', '.join(self.nicknames)
                         client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
@@ -215,38 +295,36 @@ class ServerGUI:
                         save_message(sender_name, content, recipient, True)
                     elif message.startswith('IMAGE:'):
                         self.log(f"Receiving image from {sender_name}")
-                        # Handle image data
-                        client.send('READY_FOR_IMAGE'.encode('utf-8'))
-                        
-                        # Initialize image data
-                        image_data = []
-                        
-                        while True:
-                            try:
-                                chunk = client.recv(8192).decode('utf-8')
-                                if chunk == 'END_IMAGE':
-                                    break
-                                image_data.append(chunk)
-                            except Exception as e:
-                                self.log(f"Error receiving image chunk: {e}")
-                                break
-                        
-                        # Combine all chunks
-                        full_image = ''.join(image_data)
-                        self.log(f"Received complete image data ({len(full_image)} bytes)")
-                        
-                        # Save image and get filename
                         try:
-                            filename = save_image(full_image, sender_name)
-                            if filename:
-                                self.log(f"Image saved as {filename}")
-                                # Broadcast image to all clients
-                                broadcast(f"IMAGE:{sender_name}:{filename}".encode('utf-8'))
-                            else:
-                                self.log("Failed to save image")
+                            # Send ready signal and wait for acknowledgment
+                            client.send('READY_FOR_IMAGE'.encode('utf-8'))
+                            
+                            # Forward start marker to all clients
+                            broadcast(f"IMAGE_START:{sender_name}".encode('utf-8'))
+                            
+                            # Receive and forward image data
+                            buffer_size = 8192
+                            client.settimeout(10.0)  # 10 second timeout for image data
+                            
+                            while True:
+                                chunk = client.recv(buffer_size).decode('utf-8')
+                                if chunk == 'END_IMAGE':
+                                    broadcast('END_IMAGE'.encode('utf-8'))
+                                    self.log(f"Image forwarded successfully from {sender_name}")
+                                    break
+                                if chunk:
+                                    broadcast(chunk.encode('utf-8'))
+                                else:
+                                    raise Exception("Connection lost during image transfer")
+                                    
                         except Exception as e:
-                            self.log(f"Error saving image: {e}")
-                        
+                            self.log(f"Error handling image from {sender_name}: {e}")
+                            try:
+                                client.send('IMAGE_ERROR'.encode('utf-8'))
+                            except:
+                                pass
+                        finally:
+                            client.settimeout(None)
                         continue
                     else:
                         # Handle regular message

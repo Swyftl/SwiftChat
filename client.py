@@ -296,6 +296,9 @@ def init_connection(event=None):  # Add event parameter
     PORT = int(port_entry.get())
     try:
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Add keep-alive settings
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client.connect((HOST, PORT))
         connection_screen.destroy()
         show_login_screen()
@@ -550,62 +553,97 @@ def create_online_users_window(users_list):
 
 def send_image_thread(filename):
     try:
-        # Open and resize image if needed
+        print("\n=== Starting Image Upload ===")
+        print(f"Opening image: {filename}")
+        
         with Image.open(filename) as img:
-            # Limit image size to 1000x1000
-            img.thumbnail((1000, 1000))
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
             
-            # Convert to bytes
+            # Even more aggressive compression
+            max_size = (400, 400)  # Further reduced size
+            img.thumbnail(max_size)
             img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='PNG')
+            img.save(img_byte_arr, format='JPEG', optimize=True, quality=50)  # Changed to JPEG with lower quality
             img_byte_arr = img_byte_arr.getvalue()
-            
-            # Convert to base64
             img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
-            
-            # Send image header and wait for server ready
             total_size = len(img_base64)
-            print(f"Sending image header (size: {total_size} bytes)")
-            chat_window.after(0, lambda: update_chat_status(f"Starting image upload (size: {total_size/1024:.1f} KB)"))
-            client.send('IMAGE:'.encode('utf-8'))
             
-            response = client.recv(1024).decode('utf-8')
-            print(f"Server response: {response}")
+            if total_size > 256 * 1024:  # Even smaller limit (256KB)
+                raise Exception("Image too large after compression. Please use a smaller image.")
             
-            if response == 'READY_FOR_IMAGE':
-                # Send image data in chunks
-                chunk_size = 4096
-                bytes_sent = 0
+            print(f"Starting upload ({total_size/1024:.1f} KB)")
+            
+            # No timeout for initial handshake
+            client.settimeout(None)
+            
+            try:
+                # Initial handshake
+                client.send('IMAGE_START'.encode('utf-8'))
+                print("Waiting for server ready signal...")
+                response = client.recv(1024).decode('utf-8')
+                print(f"Server response: {response}")
                 
-                # Store message for lambda to avoid variable capture issues
-                def update_progress(sent, total):
-                    progress = (int(sent) / int(total)) * 100
-                    msg = f"Sending image... {progress:.1f}% ({int(sent)/1024:.1f}/{int(total)/1024:.1f} KB)"
-                    chat_window.after(0, lambda: update_chat_status(msg))
-
+                if response != 'READY_FOR_IMAGE':
+                    raise Exception(f"Unexpected server response: {response}")
+                
+                # Send size info
+                size_info = f"SIZE:{total_size}".encode('utf-8')
+                client.send(size_info)
+                print("Waiting for size acknowledgment...")
+                
+                size_response = client.recv(1024).decode('utf-8')
+                if size_response != 'SIZE_OK':
+                    raise Exception(f"Size not acknowledged: {size_response}")
+                
+                # Send data in tiny chunks with minimal delay
+                chunk_size = 256  # Even smaller chunks
+                bytes_sent = 0
+                last_progress_update = time.time()
+                
+                print("Starting chunk transfer...")
                 for i in range(0, len(img_base64), chunk_size):
                     chunk = img_base64[i:i+chunk_size]
                     client.send(chunk.encode('utf-8'))
                     bytes_sent += len(chunk)
                     
-                    # Update progress
-                    update_progress(bytes_sent, total_size)
-                    time.sleep(0.01)  # Small delay between chunks
+                    # Update progress every second
+                    current_time = time.time()
+                    if current_time - last_progress_update >= 1.0:
+                        progress = (bytes_sent / total_size) * 100
+                        print(f"Progress: {progress:.1f}%", end='\r')
+                        chat_window.after(0, lambda p=progress: update_chat_status(
+                            f"Sending image... {p:.1f}%"))
+                        last_progress_update = current_time
+                    
+                    # Tiny delay every 4 chunks
+                    if (i // chunk_size) % 4 == 0:
+                        time.sleep(0.01)
                 
-                # Send end marker
-                print("Sending end marker")
+                print("\nSending end marker...")
                 client.send('END_IMAGE'.encode('utf-8'))
-                print("Image sent successfully")
                 
-                # Update UI in main thread
+                print("Waiting for final confirmation...")
+                final_response = client.recv(1024).decode('utf-8')
+                print(f"Final server response: {final_response}")
+                
+                if final_response != 'IMAGE_RECEIVED':
+                    raise Exception(f"Transfer failed: {final_response}")
+                
+                print("\nImage sent successfully!")
                 chat_window.after(0, lambda: play_sound('sent'))
                 chat_window.after(0, lambda: update_chat_status("Image sent successfully ✓"))
-            else:
-                raise Exception("Server not ready for image")
+                
+            except socket.timeout:
+                raise Exception("Connection timed out during image transfer")
+            except Exception as e:
+                raise Exception(f"Transfer error: {str(e)}")
+            finally:
+                client.settimeout(None)
                 
     except Exception as e:
         error_msg = f"Error sending image: {str(e)}"
-        print(error_msg)
+        print(f"\nERROR: {error_msg}")
         chat_window.after(0, lambda: update_chat_status(error_msg))
 
 def update_chat_status(message):
@@ -739,20 +777,41 @@ def display_image(filename, sender):
 def receive():
     receiving_history = False
     receiving_pm_history = False
+    receiving_image = False
+    current_image_data = []
+    current_image_sender = None
+    
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
             
-            if message.startswith('IMAGE:'):
-                _, sender, filename = message.split(':', 2)
-                chat_display.config(state=tk.NORMAL)
-                display_image(filename, sender)
-                chat_display.config(state=tk.DISABLED)
-                chat_display.yview(tk.END)
-                if sender != username:
-                    play_sound('received')
+            if message.startswith('IMAGE_START:'):
+                receiving_image = True
+                current_image_data = []
+                current_image_sender = message.split(':', 1)[1]
                 continue
                 
+            if receiving_image:
+                if message == 'END_IMAGE':
+                    receiving_image = False
+                    # Process the complete image
+                    try:
+                        image_bytes = base64.b64decode(''.join(current_image_data))
+                        # Create temporary file in memory
+                        img_file = io.BytesIO(image_bytes)
+                        # Display image
+                        display_image_from_bytes(img_file, current_image_sender)
+                        if current_image_sender != username:
+                            play_sound('received')
+                    except Exception as e:
+                        print(f"Error processing received image: {e}")
+                    current_image_data = []
+                    current_image_sender = None
+                    continue
+                else:
+                    current_image_data.append(message)
+                    continue
+                    
             # Handle join/leave sounds
             if ' joined the chat!' in message:
                 play_sound('joined')
@@ -814,6 +873,105 @@ def receive():
             print(f"Receive error: {str(e)}")
             client.close()
             break
+
+def display_image_from_bytes(img_bytes, sender):
+    """Display image directly from bytes without saving to disk"""
+    try:
+        with Image.open(img_bytes) as img:
+            # Resize image for display while maintaining aspect ratio
+            display_size = (300, 300)
+            img.thumbnail(display_size)
+            photo = ImageTk.PhotoImage(img)
+            
+            # Create frame for image with better styling
+            frame = tk.Frame(chat_display, relief=tk.RAISED, borderwidth=1)
+            
+            # Add sender label with timestamp
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            sender_label = tk.Label(frame, text=f"{sender} sent an image at {timestamp}:", 
+                                  anchor='w', font=('Arial', 9, 'bold'))
+            sender_label.pack(fill='x', padx=5, pady=2)
+            
+            # Create a container frame for the image
+            img_container = tk.Frame(frame)
+            img_container.pack(padx=5, pady=5)
+            
+            # Add image label with white background
+            img_label = tk.Label(img_container, image=photo, cursor="hand2", bg='white')
+            img_label.image = photo  # Keep reference
+            img_label.pack()
+            
+            # Add click handler to open full image
+            def open_full_image(event):
+                try:
+                    # Create new window for full image
+                    img_window = tk.Toplevel()
+                    img_window.title(f"Image from {sender}")
+                    
+                    # Reset image bytes position
+                    img_bytes.seek(0)
+                    with Image.open(img_bytes) as full_img:
+                        # Resize if too large for screen
+                        screen_w = img_window.winfo_screenwidth() - 100
+                        screen_h = img_window.winfo_screenheight() - 100
+                        
+                        # Calculate scaling factor
+                        scale_w = screen_w / full_img.width
+                        scale_h = screen_h / full_img.height
+                        scale = min(scale_w, scale_h, 1.0)  # Don't upscale
+                        
+                        new_size = (int(full_img.width * scale), 
+                                  int(full_img.height * scale))
+                        
+                        display_img = full_img.copy()
+                        display_img.thumbnail(new_size)
+                        full_photo = ImageTk.PhotoImage(display_img)
+                        
+                        # Display full image
+                        full_label = tk.Label(img_window, image=full_photo)
+                        full_label.image = full_photo
+                        full_label.pack()
+                        
+                        # Add save button
+                        def save_image():
+                            save_path = filedialog.asksaveasfilename(
+                                defaultextension=".png",
+                                filetypes=[("PNG files", "*.png"), 
+                                         ("JPEG files", "*.jpg"),
+                                         ("All files", "*.*")]
+                            )
+                            if save_path:
+                                img_bytes.seek(0)
+                                with open(save_path, 'wb') as f:
+                                    f.write(img_bytes.getvalue())
+                                
+                        tk.Button(img_window, text="Save Image", 
+                                command=save_image).pack(pady=5)
+                
+                except Exception as e:
+                    print(f"Error opening full image: {e}")
+                    messagebox.showerror("Error", f"Failed to open image: {str(e)}")
+            
+            img_label.bind('<Button-1>', open_full_image)
+            
+            # Add hint label
+            hint_label = tk.Label(frame, text="Click image to view full size", 
+                                font=('Arial', 8, 'italic'), fg='blue')
+            hint_label.pack(pady=(0, 5))
+            
+            # Insert frame into chat
+            chat_display.config(state=tk.NORMAL)
+            chat_display.window_create(tk.END, window=frame)
+            chat_display.insert(tk.END, '\n\n')
+            chat_display.config(state=tk.DISABLED)
+            chat_display.see(tk.END)
+            
+    except Exception as e:
+        print(f"Error displaying image: {e}")
+        chat_display.config(state=tk.NORMAL)
+        chat_display.insert(tk.END, f"[Error displaying image from {sender}: {str(e)}]\n\n")
+        chat_display.config(state=tk.DISABLED)
+        chat_display.see(tk.END)
 
 def write(event=None):  # Add event parameter for key binding
     message = message_entry.get()
@@ -879,8 +1037,9 @@ def start_chat():
     send_button = tk.Button(button_frame, text="Send", command=write)
     send_button.pack(side=tk.LEFT, padx=5)
     
-    image_button = tk.Button(button_frame, text="Send Image", command=send_image)
-    image_button.pack(side=tk.LEFT, padx=5)
+    # Temporarily disable image button while fixing functionality
+    # image_button = tk.Button(button_frame, text="Send Image", command=send_image)
+    # image_button.pack(side=tk.LEFT, padx=5)
 
     receive_thread = threading.Thread(target=receive)
     receive_thread.start()
