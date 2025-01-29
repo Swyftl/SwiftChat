@@ -2142,10 +2142,3 @@ dist/SwiftChat/_internal/wheel-0.45.1.dist-info/REQUESTED
 dist/SwiftChat/_internal/wheel-0.45.1.dist-info/WHEEL
 build/
 dist/
-.idea/misc.xml
-.idea/modules.xml
-.idea/SwiftChat.iml
-.idea/vcs.xml
-.idea/inspectionProfiles/profiles_settings.xml
-.idea/inspectionProfiles/Project_Default.xml
-.idea/.gitignore
