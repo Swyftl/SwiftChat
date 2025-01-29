@@ -3,13 +3,88 @@ import threading
 import os
 import sqlite3
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, messagebox
 from datetime import datetime
 import time
 import base64
 from PIL import Image
 import io
 import hashlib
+import requests
+import webbrowser
+import sys
+import subprocess
+
+# Version control constants
+CURRENT_VERSION = "V0.1.4"
+GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+def is_running_as_exe():
+    """Check if we're running as a bundled exe"""
+    return getattr(sys, 'frozen', False)
+
+def check_for_updates():
+    try:
+        print("Checking for server updates...")
+        response = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+        if response.status_code == 200:
+            latest_release = response.json()
+            latest_version = latest_release["tag_name"].strip("v")
+            
+            print(f"Current version: {CURRENT_VERSION}")
+            print(f"Latest version: {latest_version}")
+            
+            if latest_version > CURRENT_VERSION:
+                if messagebox.askyesno(
+                    "Server Update Available",
+                    f"A new server version ({latest_version}) is available!\n"
+                    f"You are currently running version {CURRENT_VERSION}\n\n"
+                    "Would you like to download and install the update?"
+                ):
+                    for asset in latest_release['assets']:
+                        if asset['name'].lower() == 'swiftchatserver.exe':
+                            try:
+                                current_exe = sys.executable if is_running_as_exe() else "SwiftChatServer.exe"
+                                temp_exe = "SwiftChatServer_update.exe"
+                                update_script = "server_update_helper.bat"
+                                
+                                # Download update
+                                response = requests.get(asset['browser_download_url'], stream=True)
+                                if response.status_code == 200:
+                                    with open(temp_exe, 'wb') as f:
+                                        for chunk in response.iter_content(chunk_size=8192):
+                                            f.write(chunk)
+                                    
+                                    # Create update helper script
+                                    with open(update_script, 'w') as f:
+                                        f.write('@echo off\n')
+                                        f.write('echo Updating SwiftChat Server...\n')
+                                        f.write('timeout /t 1 /nobreak >nul\n')
+                                        f.write(f'move /Y "{temp_exe}" "{current_exe}"\n')
+                                        f.write(f'start "" "{current_exe}"\n')
+                                        f.write('del "%~f0"\n')
+
+                                    # Start update script and exit
+                                    messagebox.showinfo(
+                                        "Update Ready",
+                                        "Update downloaded successfully!\n"
+                                        "The server will now restart to complete the update."
+                                    )
+                                    subprocess.Popen([update_script], shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                                    os._exit(0)
+                            except Exception as e:
+                                print(f"Error during update: {e}")
+                                messagebox.showerror(
+                                    "Update Error",
+                                    f"Failed to download update: {str(e)}"
+                                )
+                            break
+                    else:
+                        print("No SwiftChatServer.exe found in release assets")
+                        webbrowser.open(latest_release['html_url'])
+                        
+    except Exception as e:
+        print(f"Update check failed: {e}")
 
 def load_config():
     default_config = {
@@ -52,6 +127,9 @@ def load_config():
 
 class ServerGUI:
     def __init__(self):
+        # Check for updates before starting
+        check_for_updates()
+        
         # Create directories if they don't exist
         for dir in ['logs', 'images']:
             if not os.path.exists(dir):
