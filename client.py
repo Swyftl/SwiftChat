@@ -14,6 +14,9 @@ import io
 import base64
 from tkinter import colorchooser, font
 import json
+from tkinter import filedialog
+from PIL import Image, ImageTk
+from datetime import datetime  # Add this at the top with other imports
 
 # Version control
 CURRENT_VERSION = "V0.1.5"
@@ -545,6 +548,194 @@ def create_online_users_window(users_list):
     tk.Button(button_frame, text="Message", command=on_user_select).pack(side=tk.LEFT, padx=5)
     tk.Button(button_frame, text="Close", command=online_window.destroy).pack(side=tk.RIGHT, padx=5)
 
+def send_image_thread(filename):
+    try:
+        # Open and resize image if needed
+        with Image.open(filename) as img:
+            # Limit image size to 1000x1000
+            img.thumbnail((1000, 1000))
+            
+            # Convert to bytes
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='PNG')
+            img_byte_arr = img_byte_arr.getvalue()
+            
+            # Convert to base64
+            img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
+            
+            # Send image header and wait for server ready
+            total_size = len(img_base64)
+            print(f"Sending image header (size: {total_size} bytes)")
+            chat_window.after(0, lambda: update_chat_status(f"Starting image upload (size: {total_size/1024:.1f} KB)"))
+            client.send('IMAGE:'.encode('utf-8'))
+            
+            response = client.recv(1024).decode('utf-8')
+            print(f"Server response: {response}")
+            
+            if response == 'READY_FOR_IMAGE':
+                # Send image data in chunks
+                chunk_size = 4096
+                bytes_sent = 0
+                
+                # Store message for lambda to avoid variable capture issues
+                def update_progress(sent, total):
+                    progress = (int(sent) / int(total)) * 100
+                    msg = f"Sending image... {progress:.1f}% ({int(sent)/1024:.1f}/{int(total)/1024:.1f} KB)"
+                    chat_window.after(0, lambda: update_chat_status(msg))
+
+                for i in range(0, len(img_base64), chunk_size):
+                    chunk = img_base64[i:i+chunk_size]
+                    client.send(chunk.encode('utf-8'))
+                    bytes_sent += len(chunk)
+                    
+                    # Update progress
+                    update_progress(bytes_sent, total_size)
+                    time.sleep(0.01)  # Small delay between chunks
+                
+                # Send end marker
+                print("Sending end marker")
+                client.send('END_IMAGE'.encode('utf-8'))
+                print("Image sent successfully")
+                
+                # Update UI in main thread
+                chat_window.after(0, lambda: play_sound('sent'))
+                chat_window.after(0, lambda: update_chat_status("Image sent successfully ✓"))
+            else:
+                raise Exception("Server not ready for image")
+                
+    except Exception as e:
+        error_msg = f"Error sending image: {str(e)}"
+        print(error_msg)
+        chat_window.after(0, lambda: update_chat_status(error_msg))
+
+def update_chat_status(message):
+    """Update chat display with status message"""
+    try:
+        chat_display.config(state=tk.NORMAL)
+        
+        # Get all lines of text
+        text_content = chat_display.get("1.0", tk.END).split('\n')
+        
+        # Find and remove the last status message
+        for i in range(len(text_content) - 1, -1, -1):
+            if "Sending image..." in text_content[i]:
+                # Delete the line containing the status
+                chat_display.delete(f"{i+1}.0", f"{i+2}.0")
+                break
+        
+        # Add new status message
+        chat_display.insert(tk.END, f"{message}\n")
+        chat_display.config(state=tk.DISABLED)
+        chat_display.see(tk.END)
+    except Exception as e:
+        print(f"Error updating chat status: {e}")
+
+def send_image():
+    filetypes = [
+        ('Image files', '*.png *.jpg *.jpeg *.gif *.bmp'),
+        ('All files', '*.*')
+    ]
+    filename = filedialog.askopenfilename(filetypes=filetypes)
+    if filename:
+        update_chat_status("Sending image... Please wait...")
+        threading.Thread(target=send_image_thread, args=(filename,), daemon=True).start()
+
+def display_image(filename, sender):
+    try:
+        img_path = os.path.join('images', filename)
+        with Image.open(img_path) as img:
+            # Resize image for display while maintaining aspect ratio
+            display_size = (300, 300)
+            img.thumbnail(display_size)
+            photo = ImageTk.PhotoImage(img)
+            
+            # Create frame for image with better styling
+            frame = tk.Frame(chat_display, relief=tk.RAISED, borderwidth=1)
+            
+            # Add sender label with timestamp (fixed timestamp reference)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            sender_label = tk.Label(frame, text=f"{sender} sent an image at {timestamp}:", 
+                                  anchor='w', font=('Arial', 9, 'bold'))
+            sender_label.pack(fill='x', padx=5, pady=2)
+            
+            # Create a container frame for the image
+            img_container = tk.Frame(frame)
+            img_container.pack(padx=5, pady=5)
+            
+            # Add image label with white background
+            img_label = tk.Label(img_container, image=photo, cursor="hand2", bg='white')
+            img_label.image = photo  # Keep reference
+            img_label.pack()
+            
+            # Add click handler to open full image
+            def open_full_image(event):
+                try:
+                    # Create new window for full image
+                    img_window = tk.Toplevel()
+                    img_window.title(f"Image from {sender}")
+                    
+                    # Load original image
+                    with Image.open(img_path) as full_img:
+                        # Resize if too large for screen
+                        screen_w = img_window.winfo_screenwidth() - 100
+                        screen_h = img_window.winfo_screenheight() - 100
+                        
+                        # Calculate scaling factor
+                        scale_w = screen_w / full_img.width
+                        scale_h = screen_h / full_img.height
+                        scale = min(scale_w, scale_h, 1.0)  # Don't upscale
+                        
+                        new_size = (int(full_img.width * scale), 
+                                  int(full_img.height * scale))
+                        
+                        # Create a copy before resizing to prevent modifying original
+                        display_img = full_img.copy()
+                        display_img = display_img.resize(new_size, Image.Resampling.LANCZOS)
+                        full_photo = ImageTk.PhotoImage(display_img)
+                        
+                        # Display full image
+                        full_label = tk.Label(img_window, image=full_photo)
+                        full_label.image = full_photo
+                        full_label.pack()
+                        
+                        # Add save button
+                        def save_image():
+                            save_path = filedialog.asksaveasfilename(
+                                defaultextension=".png",
+                                filetypes=[("PNG files", "*.png"), 
+                                         ("JPEG files", "*.jpg"),
+                                         ("All files", "*.*")]
+                            )
+                            if save_path:
+                                full_img.save(save_path)
+                        
+                        tk.Button(img_window, text="Save Image", 
+                                command=save_image).pack(pady=5)
+                
+                except Exception as e:
+                    print(f"Error opening full image: {e}")
+                    messagebox.showerror("Error", f"Failed to open image: {str(e)}")
+            
+            img_label.bind('<Button-1>', open_full_image)
+            
+            # Add "Click to view full image" hint
+            hint_label = tk.Label(frame, text="Click image to view full size", 
+                                font=('Arial', 8, 'italic'), fg='blue')
+            hint_label.pack(pady=(0, 5))
+            
+            # Insert frame into chat
+            chat_display.window_create(tk.END, window=frame)
+            chat_display.insert(tk.END, '\n\n')
+            chat_display.see(tk.END)  # Make sure the new image is visible
+            
+    except Exception as e:
+        print(f"Error displaying image: {e}")
+        # Show error message in chat
+        chat_display.config(state=tk.NORMAL)
+        chat_display.insert(tk.END, f"[Error loading image from {sender}: {str(e)}]\n\n")
+        chat_display.config(state=tk.DISABLED)
+        chat_display.see(tk.END)
+
 def receive():
     receiving_history = False
     receiving_pm_history = False
@@ -552,6 +743,16 @@ def receive():
         try:
             message = client.recv(1024).decode('utf-8')
             
+            if message.startswith('IMAGE:'):
+                _, sender, filename = message.split(':', 2)
+                chat_display.config(state=tk.NORMAL)
+                display_image(filename, sender)
+                chat_display.config(state=tk.DISABLED)
+                chat_display.yview(tk.END)
+                if sender != username:
+                    play_sound('received')
+                continue
+                
             # Handle join/leave sounds
             if ' joined the chat!' in message:
                 play_sound('joined')
@@ -671,8 +872,15 @@ def start_chat():
     # Replace keyboard module with Tkinter binding
     message_entry.bind('<Return>', write)
     
-    send_button = tk.Button(chat_window, text="Send", command=write)
-    send_button.pack(padx=20, pady=5)
+    # Add image button
+    button_frame = tk.Frame(chat_window)
+    button_frame.pack(fill=tk.X, padx=20)
+    
+    send_button = tk.Button(button_frame, text="Send", command=write)
+    send_button.pack(side=tk.LEFT, padx=5)
+    
+    image_button = tk.Button(button_frame, text="Send Image", command=send_image)
+    image_button.pack(side=tk.LEFT, padx=5)
 
     receive_thread = threading.Thread(target=receive)
     receive_thread.start()

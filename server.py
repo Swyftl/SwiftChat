@@ -6,6 +6,10 @@ import tkinter as tk
 from tkinter import scrolledtext
 from datetime import datetime
 import time
+import base64
+from PIL import Image
+import io
+import hashlib
 
 def load_config():
     config = {}
@@ -22,9 +26,10 @@ def load_config():
 
 class ServerGUI:
     def __init__(self):
-        # Create logs directory if it doesn't exist
-        if not os.path.exists('logs'):
-            os.makedirs('logs')
+        # Create directories if they don't exist
+        for dir in ['logs', 'images']:
+            if not os.path.exists(dir):
+                os.makedirs(dir)
         
         self.log_contents = []  # Store log messages
         self.root = tk.Tk()
@@ -110,6 +115,7 @@ class ServerGUI:
                         message TEXT NOT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         is_private BOOLEAN DEFAULT 0,
+                        is_image BOOLEAN DEFAULT 0,
                         FOREIGN KEY (sender) REFERENCES users(username))''')
         conn.commit()
 
@@ -164,11 +170,36 @@ class ServerGUI:
             except Exception as e:
                 self.log(f"Error saving message to database: {str(e)}")
 
+        def save_image(image_data, sender):
+            try:
+                # Decode base64 image
+                image_bytes = base64.b64decode(image_data)
+                
+                # Generate unique filename using hash
+                filename = f"{hashlib.md5(image_bytes).hexdigest()}.png"
+                filepath = os.path.join('images', filename)
+                
+                # Save image
+                with open(filepath, 'wb') as f:
+                    f.write(image_bytes)
+                
+                # Save image reference in database
+                cursor.execute("""
+                    INSERT INTO messages (sender, message, is_image)
+                    VALUES (?, ?, ?)
+                """, (sender, filename, True))
+                conn.commit()
+                
+                return filename
+            except Exception as e:
+                self.log(f"Error saving image: {e}")
+                return None
+
         def handle_client(client):
             while True:
                 try:
                     message = client.recv(1024).decode('utf-8')
-                    sender_name = self.nicknames[self.clients.index(client)]  # Get authenticated username
+                    sender_name = self.nicknames[self.clients.index(client)]
                     
                     if message == '/online':
                         online_users = ', '.join(self.nicknames)
@@ -182,6 +213,41 @@ class ServerGUI:
                         send_private_message(client, sender_name, recipient, content)
                         # Save private message
                         save_message(sender_name, content, recipient, True)
+                    elif message.startswith('IMAGE:'):
+                        self.log(f"Receiving image from {sender_name}")
+                        # Handle image data
+                        client.send('READY_FOR_IMAGE'.encode('utf-8'))
+                        
+                        # Initialize image data
+                        image_data = []
+                        
+                        while True:
+                            try:
+                                chunk = client.recv(8192).decode('utf-8')
+                                if chunk == 'END_IMAGE':
+                                    break
+                                image_data.append(chunk)
+                            except Exception as e:
+                                self.log(f"Error receiving image chunk: {e}")
+                                break
+                        
+                        # Combine all chunks
+                        full_image = ''.join(image_data)
+                        self.log(f"Received complete image data ({len(full_image)} bytes)")
+                        
+                        # Save image and get filename
+                        try:
+                            filename = save_image(full_image, sender_name)
+                            if filename:
+                                self.log(f"Image saved as {filename}")
+                                # Broadcast image to all clients
+                                broadcast(f"IMAGE:{sender_name}:{filename}".encode('utf-8'))
+                            else:
+                                self.log("Failed to save image")
+                        except Exception as e:
+                            self.log(f"Error saving image: {e}")
+                        
+                        continue
                     else:
                         # Handle regular message
                         content = message.split(':', 1)[1].strip()  # Remove username from message content
