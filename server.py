@@ -12,16 +12,42 @@ import io
 import hashlib
 
 def load_config():
-    config = {}
+    default_config = {
+        'CHATAPP_HOST': '127.0.0.1',
+        'CHATAPP_PORT': '8080',
+        'MESSAGE_HISTORY_LIMIT': '50',
+        'PM_HISTORY_LIMIT': '30',
+        'MAX_IMAGE_SIZE': '262144',  # 256KB in bytes
+        'PING_INTERVAL': '30',  # seconds
+        'MAX_USERNAME_LENGTH': '20',
+        'MAX_MESSAGE_LENGTH': '2000',
+        'AUTO_BACKUP_INTERVAL': '3600',  # 1 hour in seconds
+        'LOG_LEVEL': 'INFO',
+        'DATABASE_PATH': 'users.db',
+        'IMAGES_PATH': 'images',
+        'LOGS_PATH': 'logs',
+        'ENABLE_USER_AVATARS': 'false',
+        'MAX_USERS': '100',
+        'INACTIVITY_TIMEOUT': '300'  # 5 minutes in seconds
+    }
+    
+    config = default_config.copy()
     try:
-        with open('conf.env', 'r') as f:
-            for line in f:
-                if '=' in line:
-                    key, value = line.strip().split('=')
-                    config[key] = value
-    except:
-        config['CHATAPP_HOST'] = '127.0.0.1'
-        config['CHATAPP_PORT'] = '8080'
+        if os.path.exists('conf.env'):
+            with open('conf.env', 'r') as f:
+                for line in f:
+                    if '=' in line:
+                        key, value = line.strip().split('=')
+                        config[key] = value
+        else:
+            # Create config file with defaults if it doesn't exist
+            with open('conf.env', 'w') as f:
+                for key, value in default_config.items():
+                    f.write(f"{key}={value}\n")
+            print("Created default configuration file conf.env")
+    except Exception as e:
+        print(f"Error loading configuration: {e}")
+    
     return config
 
 class ServerGUI:
@@ -39,6 +65,34 @@ class ServerGUI:
         # Load configuration
         self.config = load_config()
         
+        # Convert config values to appropriate types
+        self.message_history_limit = int(self.config['MESSAGE_HISTORY_LIMIT'])
+        self.pm_history_limit = int(self.config['PM_HISTORY_LIMIT'])
+        self.max_image_size = int(self.config['MAX_IMAGE_SIZE'])
+        self.ping_interval = int(self.config['PING_INTERVAL'])
+        self.max_username_length = int(self.config['MAX_USERNAME_LENGTH'])
+        self.max_message_length = int(self.config['MAX_MESSAGE_LENGTH'])
+        self.auto_backup_interval = int(self.config['AUTO_BACKUP_INTERVAL'])
+        self.log_level = self.config['LOG_LEVEL']
+        self.max_users = int(self.config['MAX_USERS'])
+        self.inactivity_timeout = int(self.config['INACTIVITY_TIMEOUT'])
+        
+        # Update paths from config
+        self.database_path = self.config['DATABASE_PATH']
+        self.images_path = self.config['IMAGES_PATH']
+        self.logs_path = self.config['LOGS_PATH']
+        
+        # Create directories from config
+        for dir_path in [self.logs_path, self.images_path]:
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+
+        # Start auto-backup timer if enabled
+        if self.auto_backup_interval > 0:
+            self.backup_timer = threading.Timer(self.auto_backup_interval, self.backup_database)
+            self.backup_timer.daemon = True
+            self.backup_timer.start()
+        
         # Log display
         self.log_display = scrolledtext.ScrolledText(self.root, state=tk.DISABLED)
         self.log_display.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
@@ -46,6 +100,23 @@ class ServerGUI:
         # Server status
         self.status_label = tk.Label(self.root, text="Server Status: Starting...", fg="orange")
         self.status_label.pack(pady=5)
+        
+        # Add command frame
+        command_frame = tk.Frame(self.root)
+        command_frame.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Command entry
+        self.command_entry = tk.Entry(command_frame)
+        self.command_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.command_entry.bind('<Return>', self.process_command)
+        
+        # Execute button
+        execute_button = tk.Button(command_frame, text="Execute", command=self.process_command)
+        execute_button.pack(side=tk.RIGHT, padx=5)
+        
+        # Command help button
+        help_button = tk.Button(command_frame, text="Help", command=self.show_command_help)
+        help_button.pack(side=tk.RIGHT, padx=5)
         
         # Start server in separate thread
         threading.Thread(target=self.run_server, daemon=True).start()
@@ -87,6 +158,22 @@ class ServerGUI:
         self.root.destroy()
         os._exit(0)
     
+    def backup_database(self):
+        """Backup the database periodically"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"{self.database_path}.{timestamp}.backup"
+            with open(self.database_path, 'rb') as src, open(backup_path, 'wb') as dst:
+                dst.write(src.read())
+            self.log(f"Database backed up to {backup_path}")
+            
+            # Schedule next backup
+            self.backup_timer = threading.Timer(self.auto_backup_interval, self.backup_database)
+            self.backup_timer.daemon = True
+            self.backup_timer.start()
+        except Exception as e:
+            self.log(f"Database backup failed: {e}")
+
     def run_server(self):
         # Check if conf.env exists
         if not os.path.exists('conf.env'):
@@ -196,6 +283,9 @@ class ServerGUI:
                 return None
 
         def handle_client(client):
+            # Add inactivity timeout
+            client.settimeout(self.inactivity_timeout)
+            
             try:
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -206,6 +296,11 @@ class ServerGUI:
                 try:
                     message = client.recv(1024).decode('utf-8')
                     sender_name = self.nicknames[self.clients.index(client)]
+                    
+                    # Check message length
+                    if len(message) > self.max_message_length:
+                        client.send("Message too long".encode('utf-8'))
+                        continue
                     
                     if message == 'PING':
                         client.send('PONG'.encode('utf-8'))
@@ -227,7 +322,7 @@ class ServerGUI:
                             
                             # Extract size and verify it's reasonable
                             total_size = int(size_info.split(':')[1])
-                            if total_size > 256 * 1024:  # Match client's 256KB limit
+                            if total_size > self.max_image_size:  # Match client's 256KB limit
                                 raise Exception("Image too large")
                             
                             client.send('SIZE_OK'.encode('utf-8'))
@@ -352,6 +447,16 @@ class ServerGUI:
                 username = client.recv(1024).decode('utf-8')
                 self.log(f"Got username: {username}")
                 
+                # Check username length
+                if len(username) > self.max_username_length:
+                    client.send('AUTH_FAIL'.encode('utf-8'))
+                    return None
+                
+                # Check max users limit
+                if len(self.clients) >= self.max_users:
+                    client.send('SERVER_FULL'.encode('utf-8'))
+                    return None
+                
                 # Ask for password
                 client.send('PASS'.encode('utf-8'))
                 password = client.recv(1024).decode('utf-8')
@@ -409,12 +514,12 @@ class ServerGUI:
 
         def send_message_history(client):
             try:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT sender, message, timestamp 
                     FROM messages 
                     WHERE recipient IS NULL
                     ORDER BY timestamp DESC 
-                    LIMIT 50
+                    LIMIT {self.message_history_limit}
                 """)
                 messages = cursor.fetchall()
                 
@@ -436,12 +541,12 @@ class ServerGUI:
 
         def send_pm_history(client, user1, user2):
             try:
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT sender, recipient, message, timestamp 
                     FROM messages 
                     WHERE ((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?))
                     ORDER BY timestamp DESC 
-                    LIMIT 50
+                    LIMIT {self.pm_history_limit}
                 """, (user1, user2, user2, user1))
                 messages = cursor.fetchall()
                 
@@ -495,6 +600,115 @@ class ServerGUI:
                     client.close()
             except Exception as e:
                 self.log(f"Error: {str(e)}")
+
+    def process_command(self, event=None):
+        """Process server commands"""
+        command = self.command_entry.get().strip()
+        self.command_entry.delete(0, tk.END)
+        
+        if not command:
+            return
+            
+        parts = command.split()
+        cmd = parts[0].lower()
+        args = parts[1:] if len(parts) > 1 else []
+        
+        try:
+            if cmd == "broadcast" or cmd == "bc":
+                if not args:
+                    self.log("Usage: broadcast <message>")
+                    return
+                message = f"[SERVER] {' '.join(args)}"
+                self.broadcast(message.encode('utf-8'))
+                self.log(f"Broadcast: {message}")
+                
+            elif cmd == "kick":
+                if not args:
+                    self.log("Usage: kick <username>")
+                    return
+                self.kick_user(args[0])
+                
+            elif cmd == "pm":
+                if len(args) < 2:
+                    self.log("Usage: pm <username> <message>")
+                    return
+                username = args[0]
+                message = ' '.join(args[1:])
+                self.send_private_message(username, f"[SERVER] {message}")
+                
+            elif cmd == "list":
+                online = ', '.join(self.nicknames) if self.nicknames else "No users online"
+                self.log(f"Online users: {online}")
+                
+            elif cmd == "shutdown":
+                self.log("Shutting down server...")
+                self.on_closing()
+                
+            elif cmd == "help":
+                self.show_command_help()
+                
+            else:
+                self.log(f"Unknown command: {cmd}")
+        except Exception as e:
+            self.log(f"Error executing command: {str(e)}")
+
+    def show_command_help(self):
+        """Show available commands"""
+        help_text = """
+Available Commands:
+------------------
+broadcast (bc) <message> - Send message to all users
+pm <username> <message>  - Send private message to user
+kick <username>         - Kick user from server
+list                    - Show online users
+shutdown               - Shutdown the server
+help                   - Show this help message
+"""
+        self.log(help_text)
+
+    def broadcast(self, message):
+        """Broadcast message to all clients"""
+        for client in self.clients:
+            try:
+                client.send(message)
+            except:
+                pass
+
+    def kick_user(self, username):
+        """Kick user from server"""
+        if username in self.nicknames:
+            idx = self.nicknames.index(username)
+            client = self.clients[idx]
+            
+            # Send kick message to user
+            try:
+                client.send("[SERVER] You have been kicked from the server.".encode('utf-8'))
+                client.close()
+            except:
+                pass
+            
+            # Remove from lists
+            self.clients.remove(client)
+            self.nicknames.remove(username)
+            
+            # Broadcast kick message
+            self.broadcast(f"[SERVER] {username} has been kicked from the server.".encode('utf-8'))
+            self.log(f"Kicked user: {username}")
+        else:
+            self.log(f"User not found: {username}")
+
+    def send_private_message(self, username, message):
+        """Send private message to specific user"""
+        if username in self.nicknames:
+            idx = self.nicknames.index(username)
+            client = self.clients[idx]
+            try:
+                client.send(message.encode('utf-8'))
+                self.log(f"PM to {username}: {message}")
+            except:
+                self.log(f"Error sending PM to {username}")
+        else:
+            self.log(f"User not found: {username}")
 
 if __name__ == "__main__":
     ServerGUI()
