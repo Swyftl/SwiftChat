@@ -236,6 +236,7 @@ try:
     sent_sound_path = resource_path('resources/sounds/message_sent.mp3')
     join_sound_path = resource_path('resources/sounds/user_joined.mp3')
     leave_sound_path = resource_path('resources/sounds/user_left.mp3')
+    dm_start_sound_path = resource_path('resources/sounds/DM_Started.mp3')  # Add this line
     mixer.music.load(received_sound_path)  # Load received sound by default
     sound_enabled = True
 except Exception as e:
@@ -251,6 +252,8 @@ def play_sound(sound_type='received'):
                 mixer.music.load(join_sound_path)
             elif sound_type == 'left':
                 mixer.music.load(leave_sound_path)
+            elif sound_type == 'dm_start':  # Add this condition
+                mixer.music.load(dm_start_sound_path)
             else:  # 'received'
                 mixer.music.load(received_sound_path)
             mixer.music.play()
@@ -471,6 +474,9 @@ def create_private_chat(other_user):
     pm_window = tk.Toplevel(chat_window)
     pm_window.title(f"Chat with {other_user}")
     pm_window.geometry("400x500")
+    
+    # Play DM start sound
+    play_sound('dm_start')  # Add this line
     
     # Chat display
     pm_display = scrolledtext.ScrolledText(pm_window, state=tk.DISABLED)
