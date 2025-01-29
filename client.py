@@ -19,7 +19,7 @@ from PIL import Image, ImageTk
 from datetime import datetime  # Add this at the top with other imports
 
 # Version control
-CURRENT_VERSION = "V0.1.6"
+CURRENT_VERSION = "V0.1.7"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 # Add settings file constant
