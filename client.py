@@ -231,6 +231,8 @@ mixer.init()
 try:
     received_sound_path = resource_path('resources/sounds/message_received.mp3')
     sent_sound_path = resource_path('resources/sounds/message_sent.mp3')
+    join_sound_path = resource_path('resources/sounds/user_joined.mp3')
+    leave_sound_path = resource_path('resources/sounds/user_left.mp3')
     mixer.music.load(received_sound_path)  # Load received sound by default
     sound_enabled = True
 except Exception as e:
@@ -242,7 +244,11 @@ def play_sound(sound_type='received'):
         try:
             if sound_type == 'sent':
                 mixer.music.load(sent_sound_path)
-            else:
+            elif sound_type == 'joined':
+                mixer.music.load(join_sound_path)
+            elif sound_type == 'left':
+                mixer.music.load(leave_sound_path)
+            else:  # 'received'
                 mixer.music.load(received_sound_path)
             mixer.music.play()
         except Exception as e:
@@ -545,6 +551,12 @@ def receive():
     while True:
         try:
             message = client.recv(1024).decode('utf-8')
+            
+            # Handle join/leave sounds
+            if ' joined the chat!' in message:
+                play_sound('joined')
+            elif ' left the chat!' in message:
+                play_sound('left')
             
             # Handle PM history
             if message.startswith('PM_HISTORY:'):
