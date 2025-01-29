@@ -12,10 +12,138 @@ import time
 import json
 import io
 import base64
+from tkinter import colorchooser, font
+import json
 
 # Version control
 CURRENT_VERSION = "V0.1.5"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+# Add settings file constant
+SETTINGS_FILE = 'chat_settings.json'
+
+# Add default settings
+DEFAULT_SETTINGS = {
+    'bg_color': '#ffffff',
+    'text_color': '#000000',
+    'font_family': 'Arial',
+    'font_size': 10
+}
+
+def load_settings():
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+    return DEFAULT_SETTINGS.copy()
+
+def save_settings(settings):
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f)
+    except Exception as e:
+        print(f"Error saving settings: {e}")
+
+def apply_chat_settings(settings=None):
+    if settings is None:
+        settings = load_settings()
+    
+    # Apply settings to main chat display
+    chat_display.configure(
+        bg=settings['bg_color'],
+        fg=settings['text_color'],
+        font=(settings['font_family'], settings['font_size'])
+    )
+    
+    # Apply to private chat windows
+    for _, (_, display) in private_chats.items():
+        display.configure(
+            bg=settings['bg_color'],
+            fg=settings['text_color'],
+            font=(settings['font_family'], settings['font_size'])
+        )
+
+def show_settings_window():
+    settings = load_settings()
+    settings_window = tk.Toplevel(chat_window)
+    settings_window.title("Chat Settings")
+    settings_window.geometry("300x400")
+    
+    def choose_bg_color():
+        color = colorchooser.askcolor(color=settings['bg_color'])[1]
+        if color:
+            settings['bg_color'] = color
+            bg_preview.config(bg=color)
+    
+    def choose_text_color():
+        color = colorchooser.askcolor(color=settings['text_color'])[1]
+        if color:
+            settings['text_color'] = color
+            text_preview.config(fg=color)
+    
+    def update_font_preview():
+        preview_font = (font_var.get(), size_var.get())
+        text_preview.config(font=preview_font)
+    
+    # Color settings
+    tk.Label(settings_window, text="Colors:").pack(pady=5)
+    
+    # Background color
+    bg_frame = tk.Frame(settings_window)
+    bg_frame.pack(fill='x', padx=20)
+    tk.Label(bg_frame, text="Background:").pack(side='left')
+    bg_preview = tk.Label(bg_frame, text="   ", bg=settings['bg_color'])
+    bg_preview.pack(side='left', padx=5)
+    tk.Button(bg_frame, text="Choose", command=choose_bg_color).pack(side='left')
+    
+    # Text color
+    text_frame = tk.Frame(settings_window)
+    text_frame.pack(fill='x', padx=20, pady=5)
+    tk.Label(text_frame, text="Text Color:").pack(side='left')
+    text_preview = tk.Label(text_frame, text="Sample", fg=settings['text_color'])
+    text_preview.pack(side='left', padx=5)
+    tk.Button(text_frame, text="Choose", command=choose_text_color).pack(side='left')
+    
+    # Font settings
+    tk.Label(settings_window, text="Font:").pack(pady=5)
+    
+    # Font family
+    available_fonts = sorted(font.families())
+    font_var = tk.StringVar(value=settings['font_family'])
+    font_menu = tk.OptionMenu(settings_window, font_var, *available_fonts, command=lambda _: update_font_preview())
+    font_menu.pack(pady=5)
+    
+    # Font size
+    size_frame = tk.Frame(settings_window)
+    size_frame.pack(pady=5)
+    tk.Label(size_frame, text="Size:").pack(side='left')
+    size_var = tk.IntVar(value=settings['font_size'])
+    size_spin = tk.Spinbox(size_frame, from_=8, to=24, width=5, textvariable=size_var, command=update_font_preview)
+    size_spin.pack(side='left')
+    
+    # Preview area
+    tk.Label(settings_window, text="Preview:").pack(pady=5)
+    text_preview = tk.Label(settings_window, text="Sample Text", 
+                           font=(settings['font_family'], settings['font_size']),
+                           fg=settings['text_color'], bg=settings['bg_color'])
+    text_preview.pack(pady=5)
+    
+    def apply_settings():
+        settings.update({
+            'font_family': font_var.get(),
+            'font_size': size_var.get()
+        })
+        save_settings(settings)
+        apply_chat_settings(settings)
+        settings_window.destroy()
+    
+    # Buttons
+    button_frame = tk.Frame(settings_window)
+    button_frame.pack(pady=20)
+    tk.Button(button_frame, text="Apply", command=apply_settings).pack(side='left', padx=5)
+    tk.Button(button_frame, text="Cancel", command=settings_window.destroy).pack(side='left', padx=5)
 
 def is_running_as_exe():
     """Check if we're running as a bundled exe"""
@@ -515,6 +643,11 @@ def start_chat():
     view_menu.add_command(label="Show Online Users", command=show_online_users)
     menubar.add_cascade(label="View", menu=view_menu)
     
+    # Add Settings menu
+    settings_menu = tk.Menu(menubar, tearoff=0)
+    settings_menu.add_command(label="Customize Chat", command=show_settings_window)
+    menubar.add_cascade(label="Settings", menu=settings_menu)
+    
     chat_window.config(menu=menubar)
 
     chat_display = scrolledtext.ScrolledText(chat_window, state=tk.DISABLED)
@@ -531,6 +664,9 @@ def start_chat():
 
     receive_thread = threading.Thread(target=receive)
     receive_thread.start()
+
+    # Apply saved settings
+    apply_chat_settings()
 
     chat_window.mainloop()
 

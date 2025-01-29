@@ -2142,3 +2142,4 @@ dist/SwiftChat/_internal/wheel-0.45.1.dist-info/REQUESTED
 dist/SwiftChat/_internal/wheel-0.45.1.dist-info/WHEEL
 build/
 dist/
+chat_settings.json
