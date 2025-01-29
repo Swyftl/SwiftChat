@@ -14,7 +14,7 @@ import io
 import base64
 
 # Version control
-CURRENT_VERSION = "V0.1.4"
+CURRENT_VERSION = "V0.1.5"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def is_running_as_exe():
