@@ -14,6 +14,7 @@ import requests
 import webbrowser
 import sys
 import subprocess
+from encryption import E2EEncryption
 
 # Version control constants
 CURRENT_VERSION = "V0.2.0"
@@ -302,6 +303,7 @@ class ServerGUI:
 
         self.clients = []
         self.nicknames = []
+        self.user_keys = {}  # Store public keys for each user
 
         def broadcast(message):
             for client in self.clients:
@@ -375,11 +377,43 @@ class ServerGUI:
                     message = client.recv(1024).decode('utf-8')
                     sender_name = self.nicknames[self.clients.index(client)]
                     
-                    # Check message length
-                    if len(message) > self.max_message_length:
-                        client.send("Message too long".encode('utf-8'))
+                    if message.startswith('KEY_EXCHANGE:'):
+                        # Handle key exchange request
+                        _, recipient = message.split(':', 1)
+                        if recipient in self.nicknames:
+                            # Forward sender's public key to recipient
+                            recipient_idx = self.nicknames.index(recipient)
+                            recipient_client = self.clients[recipient_idx]
+                            recipient_client.send(f"PUBLIC_KEY:{sender_name}:{self.user_keys[sender_name]}".encode())
+                        continue
+                        
+                    if message.startswith('PUBLIC_KEY:'):
+                        # Forward public key response
+                        _, recipient, key_data = message.split(':', 2)
+                        if recipient in self.nicknames:
+                            recipient_idx = self.nicknames.index(recipient)
+                            recipient_client = self.clients[recipient_idx]
+                            recipient_client.send(f"PUBLIC_KEY:{sender_name}:{key_data}".encode())
                         continue
                     
+                    if message.startswith('SESSION_KEY:'):
+                        # Forward encrypted session key
+                        _, recipient, key_data = message.split(':', 2)
+                        if recipient in self.nicknames:
+                            recipient_idx = self.nicknames.index(recipient)
+                            recipient_client = self.clients[recipient_idx]
+                            recipient_client.send(f"SESSION_KEY:{sender_name}:{key_data}".encode())
+                        continue
+                        
+                    if message.startswith('ENCRYPTED_MSG:'):
+                        # Forward encrypted message
+                        _, recipient, enc_data = message.split(':', 2)
+                        if recipient in self.nicknames:
+                            recipient_idx = self.nicknames.index(recipient)
+                            recipient_client = self.clients[recipient_idx]
+                            recipient_client.send(f"ENCRYPTED_MSG:{sender_name}:{enc_data}".encode())
+                        continue
+                        
                     if message == 'PING':
                         client.send('PONG'.encode('utf-8'))
                         continue
@@ -546,8 +580,13 @@ class ServerGUI:
                 self.log(f"Database query result: {result}")
                 
                 if result:
+                    # Get client's public key
+                    client.send('SEND_KEY'.encode())
+                    public_key = client.recv(4096).decode()  # Larger buffer for key
+                    self.user_keys[username] = public_key
+                    
                     self.log(f"User {username} authenticated successfully")
-                    client.send('AUTH_SUCCESS'.encode('utf-8'))
+                    client.send('AUTH_SUCCESS'.encode())
                     return username
                 else:
                     self.log(f"Authentication failed for user {username}")

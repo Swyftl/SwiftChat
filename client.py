@@ -13,6 +13,8 @@ import requests
 import webbrowser
 import subprocess
 import json
+from encryption import E2EEncryption
+import base64
 
 # Version control constants
 CURRENT_VERSION = "V0.2.0"
@@ -293,6 +295,9 @@ class ChatMainWindow(QMainWindow):
         # Load saved settings
         self.load_settings()
 
+        self.encryption = E2EEncryption()
+        self.secure_chats = {}  # Track encrypted chats
+
     def create_menus(self):
         menubar = self.menuBar()
         
@@ -369,6 +374,40 @@ class ChatMainWindow(QMainWindow):
 
     def handle_message(self, message):
         """Handle regular messages"""
+        if message.startswith('PUBLIC_KEY:'):
+            # Handle received public key
+            _, sender, key_data = message.split(':', 2)
+            try:
+                # Generate and send session key
+                session_key, encrypted_key = self.encryption.generate_session_key(key_data.encode())
+                client.send(f"SESSION_KEY:{sender}:{base64.b64encode(encrypted_key).decode()}".encode())
+                self.encryption.store_session_key(sender, session_key)
+                self.secure_chats[sender] = True
+            except Exception as e:
+                print(f"Key exchange error: {e}")
+            return
+            
+        if message.startswith('SESSION_KEY:'):
+            # Handle received session key
+            _, sender, enc_key = message.split(':', 2)
+            try:
+                session_key = self.encryption.decrypt_session_key(base64.b64decode(enc_key))
+                self.encryption.store_session_key(sender, session_key)
+                self.secure_chats[sender] = True
+            except Exception as e:
+                print(f"Session key error: {e}")
+            return
+            
+        if message.startswith('ENCRYPTED_MSG:'):
+            # Handle encrypted message
+            _, sender, enc_data = message.split(':', 2)
+            try:
+                decrypted = self.encryption.decrypt_message(sender, base64.b64decode(enc_data))
+                self.chat_display.append(f"{sender}: {decrypted}")
+            except Exception as e:
+                print(f"Decryption error: {e}")
+            return
+
         if ' joined the chat!' in message:
             self.play_sound('joined')
         elif ' left the chat!' in message:
@@ -473,6 +512,20 @@ class ChatMainWindow(QMainWindow):
                     self.sound_enabled = settings.get('sound_enabled', 'true').lower() == 'true'
         except Exception as e:
             print(f"Error loading settings: {e}")
+
+    def send_private_message(self, recipient, message):
+        """Send encrypted private message"""
+        if recipient not in self.secure_chats:
+            # Initiate key exchange
+            client.send(f"KEY_EXCHANGE:{recipient}".encode())
+            self.chat_display.append(f"Establishing secure connection with {recipient}...")
+            return
+            
+        try:
+            encrypted = self.encryption.encrypt_message(recipient, message)
+            client.send(f"ENCRYPTED_MSG:{recipient}:{base64.b64encode(encrypted).decode()}".encode())
+        except Exception as e:
+            print(f"Encryption error: {e}")
 
 class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
