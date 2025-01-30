@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QTextEdit, QDialog, QMessageBox,
                             QListWidget, QComboBox, QFormLayout,  # Add QComboBox, QFormLayout
-                            QColorDialog, QFontDialog, QCheckBox)  # Add these imports
+                            QColorDialog, QFontDialog, QCheckBox, QListWidgetItem)  # Add these imports
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject, QTimer  # Add QTimer
 from PyQt6.QtGui import QFont, QColor
 import sys
@@ -16,6 +16,7 @@ import json
 from encryption import E2EEncryption
 import base64
 from profiles import ProfileManager  # Add this import
+from datetime import datetime  # Change the import
 
 # Version control constants
 CURRENT_VERSION = "V0.2.2"
@@ -286,6 +287,7 @@ class MessageReceiver(QObject):
     private_message_received = pyqtSignal(str, str)
     online_users_received = pyqtSignal(list)
     connection_lost = pyqtSignal()
+    friends_list_received = pyqtSignal(str)  # Add new signal
 
     def __init__(self):
         super().__init__()
@@ -294,20 +296,30 @@ class MessageReceiver(QObject):
     def run(self):
         while self.running:
             try:
-                message = client.recv(1024).decode('utf-8')
-                
-                if message.startswith('ONLINE_USERS:'):
-                    users = message.split(':')[1].split(', ')
-                    self.online_users_received.emit(users)
-                elif message.startswith('[Private]'):
-                    sender = message[9:].split(':')[0].strip()
-                    self.private_message_received.emit(sender, message)
-                elif message.startswith('[Private to'):
-                    recipient = message[11:].split(']')[0].strip()
-                    self.private_message_received.emit(recipient, message)
-                else:
-                    self.message_received.emit(message)
-            except:
+                # Add select to prevent blocking
+                import select
+                ready = select.select([client], [], [], 0.1)  # 0.1s timeout
+                if ready[0]:
+                    message = client.recv(1024).decode('utf-8')
+                    if not message:
+                        raise ConnectionError("Connection lost")
+                        
+                    if message.startswith('FRIENDS_LIST:'):
+                        _, friends_data = message.split(':', 1)
+                        self.friends_list_received.emit(friends_data)
+                    elif message.startswith('ONLINE_USERS:'):
+                        users = message.split(':')[1].split(', ')
+                        self.online_users_received.emit(users)
+                    elif message.startswith('[Private]'):
+                        sender = message[9:].split(':')[0].strip()
+                        self.private_message_received.emit(sender, message)
+                    elif message.startswith('[Private to'):
+                        recipient = message[11:].split(']')[0].strip()
+                        self.private_message_received.emit(recipient, message)
+                    else:
+                        self.message_received.emit(message)
+            except Exception as e:
+                print(f"Receiver error: {e}")
                 if self.running:
                     self.connection_lost.emit()
                     self.running = False
@@ -385,6 +397,7 @@ class ChatMainWindow(QMainWindow):
         self.receiver.private_message_received.connect(self.handle_private_message)
         self.receiver.online_users_received.connect(self.show_online_users_dialog)
         self.receiver.connection_lost.connect(self.handle_connection_lost)
+        self.receiver.friends_list_received.connect(self.update_friends_list)
         
         # Start receiver thread
         self.receiver_thread.started.connect(self.receiver.run)
@@ -400,6 +413,8 @@ class ChatMainWindow(QMainWindow):
         self.encryption = encryption_instance or E2EEncryption()
         self.secure_chats = {}  # Track encrypted chats
 
+        self.friends_dialog = None
+
     def create_menus(self):
         menubar = self.menuBar()
         
@@ -412,6 +427,10 @@ class ChatMainWindow(QMainWindow):
         view_menu = menubar.addMenu("View")
         users_action = view_menu.addAction("Show Online Users")
         users_action.triggered.connect(lambda: client.send('/online'.encode('utf-8')))  # Fixed connection
+
+        # Add Friends menu item
+        friends_action = view_menu.addAction("Friends List")
+        friends_action.triggered.connect(self.show_friends_dialog)
         
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
@@ -508,6 +527,51 @@ class ChatMainWindow(QMainWindow):
                 self.chat_display.append(f"{sender}: {decrypted}")
             except Exception as e:
                 print(f"Decryption error: {e}")
+            return
+
+        if message.startswith('FRIENDS_LIST:'):
+            _, friends_data = message.split(':', 1)
+            if self.friends_dialog:
+                self.friends_dialog.update_friends_list(friends_data)
+            return
+            
+        if message.startswith('FRIEND_REQUEST_RECEIVED:'):
+            _, sender = message.split(':', 1)
+            response = QMessageBox.question(
+                self,
+                "Friend Request",
+                f"{sender} wants to add you as a friend. Accept?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            accept = "accept" if response == QMessageBox.StandardButton.Yes else "reject"
+            client.send(f"FRIEND_RESPONSE:{sender}:{accept}".encode())
+            return
+            
+        if message.startswith('FRIEND_RESPONSE_RECEIVED:'):
+            _, sender, status = message.split(':', 2)
+            QMessageBox.information(
+                self,
+                "Friend Request Response",
+                f"{sender} has {status} your friend request."
+            )
+            # Refresh friends list
+            client.send('GET_FRIENDS'.encode())
+            return
+            
+        if message.startswith('FRIEND_STATUS:'):
+            _, status = message.split(':', 1)
+            if status == 'REQUEST_EXISTS':
+                QMessageBox.warning(
+                    self,
+                    "Friend Request",
+                    "Friend request already exists."
+                )
+            elif status == 'REQUEST_SENT':
+                QMessageBox.information(
+                    self,
+                    "Friend Request",
+                    "Friend request sent successfully."
+                )
             return
 
         if ' joined the chat!' in message:
@@ -628,6 +692,23 @@ class ChatMainWindow(QMainWindow):
             client.send(f"ENCRYPTED_MSG:{recipient}:{base64.b64encode(encrypted).decode()}".encode())
         except Exception as e:
             print(f"Encryption error: {e}")
+
+    def show_friends_dialog(self):
+        """Show friends management dialog"""
+        if not self.friends_dialog:
+            self.friends_dialog = FriendsDialog(self)
+            # Request friends list after dialog is created
+            try:
+                client.send('GET_FRIENDS'.encode())
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to request friends list: {str(e)}")
+        self.friends_dialog.show()
+        self.friends_dialog.raise_()
+
+    def update_friends_list(self, friends_data):
+        """Update friends list when data received"""
+        if self.friends_dialog and self.friends_dialog.isVisible():
+            self.friends_dialog.update_friends_list(friends_data)
 
 class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
@@ -1037,6 +1118,121 @@ class SettingsDialog(QDialog):
             print(f"Error saving settings: {e}")
         
         self.accept()
+
+class FriendsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Friends List")
+        self.resize(300, 400)
+        
+        layout = QVBoxLayout(self)
+        
+        # Friends list with status
+        self.status_label = QLabel("Loading friends list...", self)
+        layout.addWidget(self.status_label)
+        
+        self.friends_list = QListWidget(self)
+        layout.addWidget(self.friends_list)
+        
+        # Action buttons
+        action_layout = QHBoxLayout()
+        self.message_button = QPushButton("Message", self)
+        self.refresh_button = QPushButton("Refresh", self)
+        action_layout.addWidget(self.message_button)
+        action_layout.addWidget(self.refresh_button)
+        layout.addLayout(action_layout)
+        
+        # Add friend section
+        add_layout = QHBoxLayout()
+        self.add_input = QLineEdit(self)
+        self.add_input.setPlaceholderText("Enter username to add")
+        self.add_button = QPushButton("Add Friend", self)
+        add_layout.addWidget(self.add_input)
+        add_layout.addWidget(self.add_button)
+        layout.addLayout(add_layout)
+        
+        # Connect signals
+        self.add_button.clicked.connect(self.send_friend_request)
+        self.message_button.clicked.connect(self.message_selected)
+        self.refresh_button.clicked.connect(self.refresh_list)
+        self.add_input.returnPressed.connect(self.send_friend_request)
+        
+        # Request friends list in a safe way
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.refresh_list)
+        self.refresh_timer.setInterval(5000)  # Refresh every 5 seconds
+        
+        # Initial request after dialog shown
+        QTimer.singleShot(100, self.refresh_list)
+
+    def showEvent(self, event):
+        """Called when dialog is shown"""
+        super().showEvent(event)
+        self.refresh_timer.start()
+
+    def hideEvent(self, event):
+        """Called when dialog is hidden"""
+        super().hideEvent(event)
+        self.refresh_timer.stop()
+        
+    def refresh_list(self):
+        """Request fresh friends list"""
+        try:
+            if not client:
+                self.status_label.setText("Not connected to server")
+                return
+                
+            self.status_label.setText("Refreshing friends list...")
+            client.send('GET_FRIENDS'.encode())
+        except Exception as e:
+            self.status_label.setText(f"Error: {str(e)}")
+
+    def update_friends_list(self, friends_data):
+        """Update friends list display"""
+        try:
+            self.friends_list.clear()
+            if friends_data:
+                for friend_info in friends_data.split(';'):
+                    if ':' in friend_info:
+                        friend, status = friend_info.split(':')
+                        item = QListWidgetItem(f"{friend} ({status})")
+                        self.friends_list.addItem(item)
+            
+            current_time = datetime.now().strftime('%H:%M:%S')
+            self.status_label.setText(f"Last updated: {current_time}")
+            self.friends_list.show()
+        except Exception as e:
+            self.status_label.setText(f"Error updating list: {str(e)}")
+
+    def send_friend_request(self):
+        """Send friend request"""
+        friend = self.add_input.text().strip()
+        if friend:
+            if friend == username:
+                QMessageBox.warning(self, "Error", "You cannot add yourself as a friend")
+                return
+                
+            try:
+                client.send(f"FRIEND_REQUEST:{friend}".encode())
+                self.add_input.clear()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to send friend request: {str(e)}")
+
+    def message_selected(self):
+        """Message selected friend"""
+        current = self.friends_list.currentItem()
+        if current:
+            # Extract username from "username (status)" format
+            friend = current.text().split(' (')[0]
+            if friend in private_chats:
+                private_chats[friend].show()
+                private_chats[friend].raise_()
+            else:
+                chat_window = PrivateChatWindow(friend, self.parent())
+                private_chats[friend] = chat_window
+                chat_window.show()
+            self.hide()
 
 def main():
     app = QApplication(sys.argv)
