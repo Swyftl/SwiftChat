@@ -223,7 +223,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 class ChatMainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, encryption_instance=None):
         super().__init__()
         
         # Initialize sound system
@@ -295,7 +295,8 @@ class ChatMainWindow(QMainWindow):
         # Load saved settings
         self.load_settings()
 
-        self.encryption = E2EEncryption()
+        # Use passed encryption instance if available
+        self.encryption = encryption_instance or E2EEncryption()
         self.secure_chats = {}  # Track encrypted chats
 
     def create_menus(self):
@@ -650,15 +651,27 @@ class LoginDialog(QDialog):
                     # Send password
                     client.send(password.encode('utf-8'))
                     
-                    # Wait for result
-                    response = client.recv(1024).decode('utf-8')
-                    print(f"Server response: {response}")
+                    # Wait for key request
+                    msg = client.recv(1024).decode('utf-8')
+                    print(f"Server says: {msg}")
                     
-                    if response == 'AUTH_SUCCESS':
-                        print("Login successful!")
-                        save_credentials(username, password)
-                        self.accept()
-                        return
+                    if msg == 'SEND_KEY':
+                        # Initialize encryption and send public key
+                        self.encryption = E2EEncryption()
+                        public_key = self.encryption.get_public_key_bytes()
+                        client.send(public_key)
+                        
+                        # Wait for final response
+                        response = client.recv(1024).decode('utf-8')
+                        print(f"Server response: {response}")
+                        
+                        if response == 'AUTH_SUCCESS':
+                            print("Login successful!")
+                            save_credentials(username, password)
+                            # Store encryption instance for the main window
+                            self.encryption_instance = self.encryption
+                            self.accept()
+                            return
             
             self.error_label.setText("Authentication Failed")
         except Exception as e:
@@ -930,8 +943,8 @@ def main():
         # Show login dialog
         login = LoginDialog()
         if login.exec() == QDialog.DialogCode.Accepted:
-            # Show main chat window
-            window = ChatMainWindow()
+            # Show main chat window with encryption instance from login
+            window = ChatMainWindow(login.encryption_instance)
             window.show()
             return app.exec()
     
