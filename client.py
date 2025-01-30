@@ -18,7 +18,7 @@ import base64
 from profiles import ProfileManager  # Add this import
 
 # Version control constants
-CURRENT_VERSION = "V0.2.0"
+CURRENT_VERSION = "V0.2.2"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def is_running_as_exe():
