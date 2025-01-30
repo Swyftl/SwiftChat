@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
+import select
 from datetime import datetime
 import time
 import base64
@@ -435,149 +436,200 @@ class ServerGUI:
                 return ""
 
         def handle_client(client):
-            # Add inactivity timeout
+            # Configure socket
             client.settimeout(self.inactivity_timeout)
+            message_buffer = ""
+            sender_name = None  # Initialize sender_name to None
             
             try:
+                # Configure TCP settings
                 client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except:
-                pass
                 
-            while True:
+                if hasattr(socket, "TCP_KEEPIDLE"):  # Linux
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+                elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
+                if hasattr(socket, "TCP_KEEPINTVL"):
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                if hasattr(socket, "TCP_KEEPCNT"):
+                    client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+                
+                # Get the sender name safely
                 try:
-                    message = client.recv(1024).decode('utf-8')
-                    if not message:
+                    sender_name = self.nicknames[self.clients.index(client)]
+                except ValueError:
+                    self.log("Client not found in nicknames list")
+                    return
+                except Exception as e:
+                    self.log(f"Error getting sender name: {e}")
+                    return
+                
+                last_activity = time.time()
+                
+                while True:
+                    try:
+                        # Use select for non-blocking receive
+                        ready = select.select([client], [], [], 0.1)  # 100ms timeout
+                        if ready[0]:
+                            try:
+                                data = client.recv(4096)
+                                if not data:
+                                    break
+                                    
+                                # Update last activity time
+                                last_activity = time.time()
+                                message_buffer += data.decode('utf-8')
+                                
+                                # Process complete messages (split by newlines)
+                                while '\n' in message_buffer:
+                                    # Split on first newline
+                                    message, message_buffer = message_buffer.split('\n', 1)
+                                    message = message.strip()
+                                    
+                                    if not message:
+                                        continue
+                                    
+                                    self.log(f"Received from {sender_name}: {message}")
+                                    
+                                    # Handle different message types
+                                    if message == '/online':
+                                        online_users = ', '.join(self.nicknames)
+                                        client.send(f'ONLINE_USERS:{online_users}\n'.encode('utf-8'))
+                                    elif message.startswith('/pm:'):
+                                        try:
+                                            _, recipient, content = message.split(':', 2)
+                                            send_private_message(client, sender_name, recipient, content)
+                                        except Exception as e:
+                                            self.log(f"PM error: {e}")
+                                    elif message == 'GET_FRIENDS':
+                                        friends_data = get_friends_list(sender_name)
+                                        client.send(f'FRIENDS_LIST:{friends_data}\n'.encode('utf-8'))
+                                    elif message.startswith('FRIEND_REQUEST:'):
+                                        _, recipient = message.split(':', 1)
+                                        result = handle_friend_request(sender_name, recipient)
+                                        client.send(f'FRIEND_STATUS:{result}\n'.encode('utf-8'))
+                                    elif message.startswith('FRIEND_RESPONSE:'):
+                                        _, sender, response = message.split(':', 2)
+                                        result = handle_friend_response(sender_name, sender, response == 'accept')
+                                        client.send(f'FRIEND_STATUS:{result}\n'.encode('utf-8'))
+                                    else:
+                                        # Regular chat message
+                                        broadcast(f"{message}\n".encode('utf-8'))
+                                        save_message(sender_name, message)
+                            except UnicodeDecodeError:
+                                self.log(f"Unicode decode error from {sender_name}")
+                                continue
+                                
+                        # Check for inactivity
+                        if time.time() - last_activity > self.inactivity_timeout:
+                            self.log(f"Client {sender_name} timed out")
+                            break
+                            
+                    except socket.timeout:
+                        # Send keepalive ping
+                        try:
+                            client.send('PING\n'.encode('utf-8'))
+                            last_activity = time.time()
+                        except:
+                            break
+                        continue
+                    except Exception as e:
+                        self.log(f"Error handling client {sender_name}: {e}")
                         break
                         
-                    sender_name = self.nicknames[self.clients.index(client)]
-                    
-                    if message == 'GET_FRIENDS':
-                        try:
-                            friends_data = get_friends_list(sender_name)
-                            response = f"FRIENDS_LIST:{friends_data}".encode()
-                            client.send(response)
-                        except Exception as e:
-                            self.log(f"Error sending friends list to {sender_name}: {e}")
-                        continue
-                        
-                    # For encrypted messages, just forward without logging content
-                    if message.startswith('KEY_EXCHANGE:') or message.startswith('PUBLIC_KEY:') or \
-                       message.startswith('SESSION_KEY:') or message.startswith('ENCRYPTED_MSG:'):
-                        # Parse recipient from message
-                        parts = message.split(':', 2)
-                        if len(parts) >= 2:
-                            recipient = parts[1]
-                            if recipient in self.nicknames:
-                                recipient_idx = self.nicknames.index(recipient)
-                                recipient_client = self.clients[recipient_idx]
-                                # Forward encrypted data without modification
-                                recipient_client.send(f"{parts[0]}:{sender_name}:{parts[2]}".encode())
-                                self.log(f"Forwarded encrypted message from {sender_name} to {recipient}")
-                        continue
-                    
-                    # Handle regular unencrypted messages (public chat)
-                    if message == 'PING':
-                        client.send('PONG'.encode('utf-8'))
-                        continue
-                        
-                    if message == '/online':
-                        online_users = ', '.join(self.nicknames)
-                        client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
-                    elif message.startswith('/pmhistory:'):
-                        _, other_user = message.split(':', 1)
-                        send_pm_history(client, sender_name, other_user)
-                    else:
-                        # For unencrypted messages, continue with normal handling
-                        content = message.split(':', 1)[1].strip()
-                        broadcast(f"{sender_name}: {content}".encode('utf-8'))
-                        save_message(sender_name, content)
-                        self.log(f"Public message from {sender_name}")
-
-                    if message.startswith('FRIEND_REQUEST:'):
-                        _, recipient = message.split(':', 1)
-                        result = handle_friend_request(sender_name, recipient)
-                        client.send(f"FRIEND_STATUS:{result}".encode())
-                        
-                        # Notify recipient if online
-                        if recipient in self.nicknames:
-                            recipient_idx = self.nicknames.index(recipient)
-                            self.clients[recipient_idx].send(
-                                f"FRIEND_REQUEST_RECEIVED:{sender_name}".encode()
-                            )
-                        continue
-
-                    if message.startswith('FRIEND_RESPONSE:'):
-                        _, sender, response = message.split(':', 2)
-                        accept = response == 'accept'
-                        result = handle_friend_response(sender_name, sender, accept)
-                        client.send(f"FRIEND_STATUS:{result}".encode())
-                        
-                        # Notify other user if online
-                        if sender in self.nicknames:
-                            sender_idx = self.nicknames.index(sender)
-                            status = "accepted" if accept else "rejected"
-                            self.clients[sender_idx].send(
-                                f"FRIEND_RESPONSE_RECEIVED:{sender_name}:{status}".encode()
-                            )
-                        continue
-
-                    if message == 'GET_FRIENDS':
-                        friends_data = get_friends_list(sender_name)
-                        client.send(f"FRIENDS_LIST:{friends_data}".encode())
-                        continue
-                        
+            except Exception as e:
+                error_user = sender_name if sender_name else "unknown"
+                self.log(f"Client error ({error_user}): {e}")
+            finally:
+                # Handle disconnection
+                try:
+                    if sender_name and sender_name in self.nicknames:
+                        idx = self.nicknames.index(sender_name)
+                        self.clients.pop(idx)
+                        self.nicknames.remove(sender_name)
+                        broadcast(f"{sender_name} left the chat!\n".encode('utf-8'))
+                        self.log(f"Client disconnected: {sender_name}")
+                    client.close()
                 except Exception as e:
-                    self.log(f"Client error ({sender_name}): {e}")
-                    break
-
-            # ...rest of existing code...
+                    self.log(f"Error during client cleanup: {e}")
 
         def authenticate(client):
             try:
                 self.log("Starting authentication process...")
                 
-                # Ask for username
-                client.send('USER'.encode('utf-8'))
-                username = client.recv(1024).decode('utf-8')
-                self.log(f"Got username: {username}")
-                
-                # Check username length
-                if len(username) > self.max_username_length:
-                    client.send('AUTH_FAIL'.encode('utf-8'))
-                    return None
-                
-                # Check max users limit
-                if len(self.clients) >= self.max_users:
-                    client.send('SERVER_FULL'.encode('utf-8'))
-                    return None
-                
-                # Ask for password
-                client.send('PASS'.encode('utf-8'))
-                password = client.recv(1024).decode('utf-8')
-                self.log(f"Got password for user: {username}")
-                
-                # Check credentials
-                cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-                result = cursor.fetchone()
-                self.log(f"Database query result: {result}")
-                
-                if result:
-                    # Get client's public key
-                    client.send('SEND_KEY'.encode())
-                    public_key = client.recv(4096).decode()  # Larger buffer for key
-                    self.user_keys[username] = public_key
+                # Send USER prompt and wait for response
+                client.send('USER\n'.encode('utf-8'))
+                try:
+                    username_data = client.recv(1024)
+                    if not username_data:
+                        self.log("Error: No username data received")
+                        client.send('AUTH_FAIL\n'.encode('utf-8'))
+                        return None
+                    username = username_data.decode('utf-8').strip()
+                    self.log(f"Received username data: '{username}'")
                     
-                    self.log(f"User {username} authenticated successfully")
-                    client.send('AUTH_SUCCESS'.encode())
-                    return username
-                else:
-                    self.log(f"Authentication failed for user {username}")
-                    client.send('AUTH_FAIL'.encode('utf-8'))
+                    if not username:
+                        self.log("Error: Empty username received")
+                        client.send('AUTH_FAIL\n'.encode('utf-8'))
+                        return None
+                        
+                    # Request password
+                    client.send('PASS\n'.encode('utf-8'))
+                    password_data = client.recv(1024)
+                    if not password_data:
+                        self.log("Error: No password data received")
+                        client.send('AUTH_FAIL\n'.encode('utf-8'))
+                        return None
+                    password = password_data.decode('utf-8').strip()
+                except Exception as e:
+                    self.log(f"Error receiving credentials: {e}")
+                    client.send('AUTH_FAIL\n'.encode('utf-8'))
+                    return None
+
+                # Verify credentials
+                try:
+                    cursor.execute("SELECT * FROM users WHERE username=? AND password=?", 
+                                  (username, password))
+                    result = cursor.fetchone()
+                    
+                    if result:
+                        # Request public key
+                        client.send('SEND_KEY\n'.encode('utf-8'))
+                        try:
+                            # Wait for public key with timeout
+                            public_key = client.recv(4096)
+                            if public_key:
+                                self.user_keys[username] = public_key
+                                # Send success with newline and flush
+                                client.send('AUTH_SUCCESS\n'.encode('utf-8'))
+                                self.log(f"User {username} authenticated successfully")
+                                # Add a small delay to ensure message order
+                                time.sleep(0.1)
+                                return username
+                            else:
+                                self.log("No public key received")
+                                client.send('AUTH_FAIL\n'.encode('utf-8'))
+                                return None
+                        except Exception as e:
+                            self.log(f"Error during key exchange: {e}")
+                            client.send('AUTH_FAIL\n'.encode('utf-8'))
+                            return None
+                    else:
+                        self.log(f"Invalid credentials for user: {username}")
+                        client.send('AUTH_FAIL\n'.encode('utf-8'))
+                        return None
+                except Exception as e:
+                    self.log(f"Database error during authentication: {e}")
+                    client.send('AUTH_FAIL\n'.encode('utf-8'))
                     return None
                     
             except Exception as e:
                 self.log(f"Authentication error: {str(e)}")
+                try:
+                    client.send('AUTH_FAIL\n'.encode('utf-8'))
+                except:
+                    pass
                 return None
 
         def register_user(client):
@@ -674,32 +726,74 @@ class ServerGUI:
                 client, address = self.server.accept()
                 self.log(f"New connection from {address}")
 
-                auth_type = client.recv(1024).decode('utf-8')
-                if auth_type == 'LOGIN':
-                    self.log(f"Login attempt from {address}")
-                    username = authenticate(client)
-                elif auth_type == 'REGISTER':
-                    self.log(f"Registration attempt from {address}")
-                    username = register_user(client)
+                try:
+                    auth_type = client.recv(1024).decode('utf-8').strip()
+                    self.log(f"Received auth type: {auth_type}")
+                    
+                    # Initialize username as None
+                    username = None
+                    
+                    # Handle authentication based on type
+                    if auth_type == 'LOGIN':
+                        self.log(f"Login attempt from {address}")
+                        username = authenticate(client)
+                        # Debug log
+                        self.log(f"Authentication result for {address}: username={username}")
+                        
+                        if username:
+                            # Add user to active lists before starting client thread
+                            self.log(f"Adding {username} to active users")
+                            if username not in self.nicknames:  # Prevent duplicates
+                                self.nicknames.append(username)
+                                self.clients.append(client)
+                                
+                                # Send message history
+                                send_message_history(client)
+                                
+                                # Announce new user
+                                broadcast(f"{username} joined the chat!\n".encode('utf-8'))
+                                client.send('Connected to the server!\n'.encode('utf-8'))
+                                
+                                # Start client handler thread
+                                thread = threading.Thread(target=handle_client, args=(client,))
+                                thread.start()
+                                
+                                self.log(f"User {username} fully connected and handler started")
+                            else:
+                                self.log(f"Username {username} already in use")
+                                client.send('ALREADY_LOGGED_IN\n'.encode('utf-8'))
+                                client.close()
+                                
+                    elif auth_type == 'REGISTER':
+                        username = register_user(client)
+                        if username:
+                            self.log(f"Registration successful for {username}")
+                            client.close()  # Close connection after registration
+                        else:
+                            self.log("Registration failed")
+                            client.close()
+                    else:
+                        self.log(f"Invalid auth type received: {auth_type}")
+                        client.close()
+                        continue
 
-                if username:
-                    self.nicknames.append(username)
-                    self.clients.append(client)
-                    self.log(f"User authenticated: {username}")
+                    if not username:
+                        self.log(f"Authentication failed from {address}")
+                        try:
+                            client.send('AUTH_FAIL\n'.encode('utf-8'))
+                            client.close()
+                        except:
+                            pass
+                            
+                except Exception as e:
+                    self.log(f"Error during authentication process: {e}")
+                    try:
+                        client.close()
+                    except:
+                        pass
                     
-                    # Send message history before announcing new user
-                    send_message_history(client)
-                    
-                    broadcast(f"{username} joined the chat!".encode('utf-8'))
-                    client.send('Connected to the server!'.encode('utf-8'))
-                    
-                    thread = threading.Thread(target=handle_client, args=(client,))
-                    thread.start()
-                else:
-                    self.log(f"Authentication failed from {address}")
-                    client.close()
             except Exception as e:
-                self.log(f"Error: {str(e)}")
+                self.log(f"Error accepting connection: {str(e)}")
 
     def process_command(self, event=None):
         """Process server commands"""
