@@ -210,6 +210,16 @@ class MessageReceiver(QObject):
                     self.running = False
                 break
 
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    
+    return os.path.join(base_path, relative_path)
+
 class ChatMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -219,11 +229,11 @@ class ChatMainWindow(QMainWindow):
         self.sound_enabled = True
         try:
             self.sounds = {
-                'sent': pygame.mixer.Sound('resources/sounds/message_sent.mp3'),
-                'received': pygame.mixer.Sound('resources/sounds/message_received.mp3'),
-                'joined': pygame.mixer.Sound('resources/sounds/user_joined.mp3'),
-                'left': pygame.mixer.Sound('resources/sounds/user_left.mp3'),
-                'dm_start': pygame.mixer.Sound('resources/sounds/DM_Started.mp3')
+                'sent': pygame.mixer.Sound(resource_path('resources/sounds/message_sent.mp3')),
+                'received': pygame.mixer.Sound(resource_path('resources/sounds/message_received.mp3')),
+                'joined': pygame.mixer.Sound(resource_path('resources/sounds/user_joined.mp3')),
+                'left': pygame.mixer.Sound(resource_path('resources/sounds/user_left.mp3')),
+                'dm_start': pygame.mixer.Sound(resource_path('resources/sounds/DM_Started.mp3'))
             }
         except Exception as e:
             print(f"Could not load notification sounds: {e}")
