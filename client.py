@@ -1,20 +1,91 @@
 import socket
-import threading
 import os
 import pygame.mixer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QTextEdit, QMenuBar, QMenu, QDialog, QMessageBox,
                             QListWidget, QScrollArea, QFileDialog, QInputDialog)
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
 import sys
-import json
-import io
-import base64
-from PIL import Image
-from datetime import datetime
 import requests
+import webbrowser
+import subprocess
+
+# Version control constants
+CURRENT_VERSION = "V0.1.3"
+GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
+
+def is_running_as_exe():
+    """Check if we're running as a bundled exe"""
+    return getattr(sys, 'frozen', False)
+
+def check_for_updates():
+    try:
+        print("Checking for client updates...")
+        response = requests.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+        if response.status_code == 200:
+            latest_release = response.json()
+            latest_version = latest_release["tag_name"].strip("v")
+            
+            print(f"Current version: {CURRENT_VERSION}")
+            print(f"Latest version: {latest_version}")
+            
+            if latest_version > CURRENT_VERSION:
+                if QMessageBox.question(
+                    None,
+                    "Update Available",
+                    f"A new version ({latest_version}) is available!\n"
+                    f"You are currently running version {CURRENT_VERSION}\n\n"
+                    "Would you like to download and install the update?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                ) == QMessageBox.StandardButton.Yes:
+                    for asset in latest_release['assets']:
+                        if asset['name'].lower() == 'swiftchat.exe':
+                            try:
+                                current_exe = sys.executable if is_running_as_exe() else "SwiftChat.exe"
+                                temp_exe = "SwiftChat_update.exe"
+                                update_script = "update_helper.bat"
+                                
+                                # Download update
+                                response = requests.get(asset['browser_download_url'], stream=True)
+                                if response.status_code == 200:
+                                    with open(temp_exe, 'wb') as f:
+                                        for chunk in response.iter_content(chunk_size=8192):
+                                            f.write(chunk)
+                                    
+                                    # Create update helper script
+                                    with open(update_script, 'w') as f:
+                                        f.write('@echo off\n')
+                                        f.write('echo Updating SwiftChat...\n')
+                                        f.write('timeout /t 1 /nobreak >nul\n')
+                                        f.write(f'move /Y "{temp_exe}" "{current_exe}"\n')
+                                        f.write(f'start "" "{current_exe}"\n')
+                                        f.write('del "%~f0"\n')
+
+                                    # Start update script and exit
+                                    QMessageBox.information(
+                                        None,
+                                        "Update Ready",
+                                        "Update downloaded successfully!\n"
+                                        "The application will now restart to complete the update."
+                                    )
+                                    subprocess.Popen([update_script], shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                                    os._exit(0)
+                            except Exception as e:
+                                print(f"Error during update: {e}")
+                                QMessageBox.critical(
+                                    None,
+                                    "Update Error",
+                                    f"Failed to download update: {str(e)}"
+                                )
+                            break
+                    else:
+                        print("No SwiftChat.exe found in release assets")
+                        webbrowser.open(latest_release['html_url'])
+                        
+    except Exception as e:
+        print(f"Update check failed: {e}")
 
 # Global variables
 HOST = '127.0.0.1'
@@ -105,9 +176,57 @@ class ConnectionDialog(QDialog):
             self.host_input.setText(saved.get('host', HOST))
             self.port_input.setText(saved.get('port', str(PORT)))
 
+class MessageReceiver(QObject):
+    message_received = pyqtSignal(str)
+    private_message_received = pyqtSignal(str, str)
+    online_users_received = pyqtSignal(list)
+    connection_lost = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                message = client.recv(1024).decode('utf-8')
+                
+                if message.startswith('ONLINE_USERS:'):
+                    users = message.split(':')[1].split(', ')
+                    self.online_users_received.emit(users)
+                elif message.startswith('[Private]'):
+                    sender = message[9:].split(':')[0].strip()
+                    self.private_message_received.emit(sender, message)
+                elif message.startswith('[Private to'):
+                    recipient = message[11:].split(']')[0].strip()
+                    self.private_message_received.emit(recipient, message)
+                else:
+                    self.message_received.emit(message)
+            except:
+                if self.running:
+                    self.connection_lost.emit()
+                    self.running = False
+                break
+
 class ChatMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # Initialize sound system
+        pygame.mixer.init()
+        self.sound_enabled = True
+        try:
+            self.sounds = {
+                'sent': pygame.mixer.Sound('resources/sounds/message_sent.mp3'),
+                'received': pygame.mixer.Sound('resources/sounds/message_received.mp3'),
+                'joined': pygame.mixer.Sound('resources/sounds/user_joined.mp3'),
+                'left': pygame.mixer.Sound('resources/sounds/user_left.mp3'),
+                'dm_start': pygame.mixer.Sound('resources/sounds/DM_Started.mp3')
+            }
+        except Exception as e:
+            print(f"Could not load notification sounds: {e}")
+            self.sound_enabled = False
+        
         self.setWindowTitle("ChatApp")
         self.resize(800, 600)
         
@@ -141,9 +260,23 @@ class ChatMainWindow(QMainWindow):
         # Setup menu bar
         self.create_menus()
         
-        # Start receive thread
-        self.receive_thread = threading.Thread(target=self.receive, daemon=True)
-        self.receive_thread.start()
+        # Setup message receiver
+        self.receiver = MessageReceiver()
+        self.receiver_thread = QThread()
+        self.receiver.moveToThread(self.receiver_thread)
+        
+        # Connect signals
+        self.receiver.message_received.connect(self.handle_message)
+        self.receiver.private_message_received.connect(self.handle_private_message)
+        self.receiver.online_users_received.connect(self.show_online_users_dialog)
+        self.receiver.connection_lost.connect(self.handle_connection_lost)
+        
+        # Start receiver thread
+        self.receiver_thread.started.connect(self.receiver.run)
+        self.receiver_thread.start()
+
+        # Store dialogs as instance variables
+        self.online_users_dialog = None
 
     def create_menus(self):
         menubar = self.menuBar()
@@ -164,42 +297,49 @@ class ChatMainWindow(QMainWindow):
         customize_action.triggered.connect(self.show_settings)
 
     def closeEvent(self, event):
-        self.running = False
-        if client:
-            client.close()
-        event.accept()
+        """Handle window closing"""
+        try:
+            # Stop receiver thread
+            self.receiver.running = False
+            self.receiver_thread.quit()
+            self.receiver_thread.wait()
+            
+            # Close all private chat windows
+            for chat_window in private_chats.values():
+                chat_window.close()
+            
+            # Close socket and cleanup
+            if client:
+                client.close()
+            
+            # Accept the close event
+            event.accept()
+            
+            # Quit application
+            QApplication.quit()
+            
+        except Exception as e:
+            print(f"Error during shutdown: {e}")
+            # Force quit if cleanup fails
+            os._exit(0)
 
-    def receive(self):
-        """Handle receiving messages"""
-        while self.running:
-            try:
-                message = client.recv(1024).decode('utf-8')
-                
-                if message == 'MESSAGE_HISTORY_START':
-                    self.chat_display.append("=== Chat History ===\n")
-                    continue
-                elif message == 'MESSAGE_HISTORY_END':
-                    self.chat_display.append("=== End of History ===\n\n")
-                    continue
-                
-                if message.startswith('ONLINE_USERS:'):
-                    users = message.split(':')[1].split(', ')
-                    self.show_online_users_dialog(users)
-                elif message.startswith('[Private]'):
-                    sender = message[9:].split(':')[0].strip()
-                    self.handle_private_message(sender, message)
-                elif message.startswith('[Private to'):
-                    recipient = message[11:].split(']')[0].strip()
-                    self.handle_private_message(recipient, message)
-                else:
-                    self.chat_display.append(message + '\n')
-            except:
-                if self.running:
-                    self.status_label.setText("Disconnected")
-                    QMessageBox.warning(self, "Connection Lost", 
-                                      "Lost connection to server.")
-                    self.running = False
-                break
+    def handle_message(self, message):
+        """Handle regular messages"""
+        if ' joined the chat!' in message:
+            self.play_sound('joined')
+        elif ' left the chat!' in message:
+            self.play_sound('left')
+        elif not message.startswith((f'{username}:', 'MESSAGE_HISTORY', '===')):
+            self.play_sound('received')
+        
+        self.chat_display.append(message + '\n')
+
+    def handle_connection_lost(self):
+        """Handle connection lost"""
+        self.status_label.setText("Disconnected")
+        QMessageBox.warning(self, "Connection Lost", "Lost connection to server.")
+        self.receiver.running = False
+        self.close()
 
     def write(self):
         """Send message"""
@@ -208,8 +348,17 @@ class ChatMainWindow(QMainWindow):
             try:
                 client.send(f'{username}: {message}'.encode('utf-8'))
                 self.message_input.clear()
+                self.play_sound('sent')  # Play sent sound
             except:
                 QMessageBox.warning(self, "Error", "Failed to send message")
+
+    def play_sound(self, sound_type):
+        """Play notification sound"""
+        if self.sound_enabled and sound_type in self.sounds:
+            try:
+                self.sounds[sound_type].play()
+            except Exception as e:
+                print(f"Error playing sound: {e}")
 
     def handle_private_message(self, other_user, message):
         """Handle private messages"""
@@ -224,8 +373,12 @@ class ChatMainWindow(QMainWindow):
 
     def show_online_users_dialog(self, users):
         """Show online users dialog"""
-        dialog = OnlineUsersDialog(users, self)
-        dialog.exec()
+        if not self.online_users_dialog:
+            self.online_users_dialog = OnlineUsersDialog(users, self)
+        else:
+            # Update users list
+            self.online_users_dialog.update_users(users)
+        self.online_users_dialog.show()
 
     def quit_app(self):
         """Handle application quit"""
@@ -248,14 +401,23 @@ class ChatMainWindow(QMainWindow):
         # Placeholder for settings dialog
         QMessageBox.information(self, "Settings", "Settings dialog coming soon!")
 
-class PrivateChatWindow(QWidget):
+class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
         super().__init__(parent)
-        self.other_user = other_user  # Store recipient
+        self.other_user = other_user
+        self.parent = parent
+        
+        # Play DM start sound when window is created
+        if hasattr(self.parent, 'play_sound'):
+            self.parent.play_sound('dm_start')
+        
         self.setWindowTitle(f"Chat with {other_user}")
         self.resize(400, 500)
         
-        layout = QVBoxLayout(self)
+        # Create central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
         
         # Chat display
         self.chat_display = QTextEdit()
@@ -271,6 +433,17 @@ class PrivateChatWindow(QWidget):
         input_layout.addWidget(self.message_input)
         input_layout.addWidget(self.send_button)
         layout.addLayout(input_layout)
+        
+        # Add status bar
+        self.statusBar().showMessage("Connected")
+        
+        # Handle window close
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+    def closeEvent(self, event):
+        """Hide instead of close"""
+        event.ignore()
+        self.hide()
 
     def send_message(self):
         """Send private message"""
@@ -455,10 +628,25 @@ class OnlineUsersDialog(QDialog):
         message_button = QPushButton("Message")
         message_button.clicked.connect(self.message_selected)
         close_button = QPushButton("Close")
-        close_button.clicked.connect(self.close)
+        close_button.clicked.connect(self.hide)  # Change close() to hide()
         button_layout.addWidget(message_button)
         button_layout.addWidget(close_button)
         layout.addLayout(button_layout)
+
+        # Don't destroy on close
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+    def update_users(self, users_list):
+        """Update the users list"""
+        self.users_list.clear()
+        for user in users_list:
+            if user != username:
+                self.users_list.addItem(user)
+
+    def closeEvent(self, event):
+        """Hide instead of close"""
+        event.ignore()
+        self.hide()
 
     def message_selected(self):
         """Handle messaging selected user"""
@@ -472,10 +660,13 @@ class OnlineUsersDialog(QDialog):
             else:
                 private_chats[selected_user].show()
                 private_chats[selected_user].raise_()
-            self.close()
+            self.hide()  # Change close() to hide()
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Check for updates before showing any windows
+    check_for_updates()
     
     # First show connection dialog
     conn_dialog = ConnectionDialog()
