@@ -17,7 +17,7 @@ import subprocess
 from encryption import E2EEncryption
 
 # Version control constants
-CURRENT_VERSION = "V0.2.0"
+CURRENT_VERSION = "V0.2.2"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def is_running_as_exe():
@@ -290,6 +290,18 @@ class ServerGUI:
         conn.commit()
         self.log("Database setup completed")
 
+        # Add friends table
+        cursor.execute('''CREATE TABLE IF NOT EXISTS friends (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user1 TEXT NOT NULL,
+                        user2 TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (user1) REFERENCES users(username),
+                        FOREIGN KEY (user2) REFERENCES users(username),
+                        UNIQUE(user1, user2))''')
+        conn.commit()
+
         # Server setup
         HOST = self.config.get('CHATAPP_HOST', '127.0.0.1')
         PORT = int(self.config.get('CHATAPP_PORT', '8080'))
@@ -362,6 +374,66 @@ class ServerGUI:
                 self.log(f"Error saving image: {e}")
                 return None
 
+        def handle_friend_request(sender, recipient):
+            """Handle friend request between users"""
+            try:
+                # Check if request already exists
+                cursor.execute("""
+                    SELECT status FROM friends 
+                    WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)
+                """, (sender, recipient, recipient, sender))
+                result = cursor.fetchone()
+                
+                if result:
+                    return "REQUEST_EXISTS"
+                    
+                # Add friend request
+                cursor.execute("""
+                    INSERT INTO friends (user1, user2, status)
+                    VALUES (?, ?, 'pending')
+                """, (sender, recipient))
+                conn.commit()
+                return "REQUEST_SENT"
+            except Exception as e:
+                self.log(f"Friend request error: {e}")
+                return "REQUEST_FAILED"
+
+        def handle_friend_response(user1, user2, accept):
+            """Handle friend request response"""
+            try:
+                status = 'accepted' if accept else 'rejected'
+                cursor.execute("""
+                    UPDATE friends 
+                    SET status = ? 
+                    WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)
+                """, (status, user1, user2, user2, user1))
+                conn.commit()
+                return "RESPONSE_SENT"
+            except Exception as e:
+                self.log(f"Friend response error: {e}")
+                return "RESPONSE_FAILED"
+
+        def get_friends_list(username):
+            """Get user's friends list"""
+            try:
+                cursor.execute("""
+                    SELECT 
+                        CASE 
+                            WHEN user1=? THEN user2 
+                            ELSE user1 
+                        END as friend,
+                        status
+                    FROM friends 
+                    WHERE (user1=? OR user2=?)
+                """, (username, username, username))
+                results = cursor.fetchall()
+                if not results:
+                    return ""
+                return ";".join([f"{friend}:{status}" for friend, status in results])
+            except Exception as e:
+                self.log(f"Error getting friends list: {e}")
+                return ""
+
         def handle_client(client):
             # Add inactivity timeout
             client.settimeout(self.inactivity_timeout)
@@ -375,8 +447,20 @@ class ServerGUI:
             while True:
                 try:
                     message = client.recv(1024).decode('utf-8')
+                    if not message:
+                        break
+                        
                     sender_name = self.nicknames[self.clients.index(client)]
                     
+                    if message == 'GET_FRIENDS':
+                        try:
+                            friends_data = get_friends_list(sender_name)
+                            response = f"FRIENDS_LIST:{friends_data}".encode()
+                            client.send(response)
+                        except Exception as e:
+                            self.log(f"Error sending friends list to {sender_name}: {e}")
+                        continue
+                        
                     # For encrypted messages, just forward without logging content
                     if message.startswith('KEY_EXCHANGE:') or message.startswith('PUBLIC_KEY:') or \
                        message.startswith('SESSION_KEY:') or message.startswith('ENCRYPTED_MSG:'):
@@ -409,16 +493,45 @@ class ServerGUI:
                         broadcast(f"{sender_name}: {content}".encode('utf-8'))
                         save_message(sender_name, content)
                         self.log(f"Public message from {sender_name}")
+
+                    if message.startswith('FRIEND_REQUEST:'):
+                        _, recipient = message.split(':', 1)
+                        result = handle_friend_request(sender_name, recipient)
+                        client.send(f"FRIEND_STATUS:{result}".encode())
+                        
+                        # Notify recipient if online
+                        if recipient in self.nicknames:
+                            recipient_idx = self.nicknames.index(recipient)
+                            self.clients[recipient_idx].send(
+                                f"FRIEND_REQUEST_RECEIVED:{sender_name}".encode()
+                            )
+                        continue
+
+                    if message.startswith('FRIEND_RESPONSE:'):
+                        _, sender, response = message.split(':', 2)
+                        accept = response == 'accept'
+                        result = handle_friend_response(sender_name, sender, accept)
+                        client.send(f"FRIEND_STATUS:{result}".encode())
+                        
+                        # Notify other user if online
+                        if sender in self.nicknames:
+                            sender_idx = self.nicknames.index(sender)
+                            status = "accepted" if accept else "rejected"
+                            self.clients[sender_idx].send(
+                                f"FRIEND_RESPONSE_RECEIVED:{sender_name}:{status}".encode()
+                            )
+                        continue
+
+                    if message == 'GET_FRIENDS':
+                        friends_data = get_friends_list(sender_name)
+                        client.send(f"FRIENDS_LIST:{friends_data}".encode())
+                        continue
                         
                 except Exception as e:
-                    index = self.clients.index(client)
-                    self.clients.remove(client)
-                    client.close()
-                    nickname = self.nicknames[index]
-                    self.log(f"User disconnected: {nickname}")
-                    broadcast(f'{nickname} left the chat!'.encode('utf-8'))
-                    self.nicknames.remove(nickname)
+                    self.log(f"Client error ({sender_name}): {e}")
                     break
+
+            # ...rest of existing code...
 
         def authenticate(client):
             try:
