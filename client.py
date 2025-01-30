@@ -587,6 +587,7 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("ChatApp - Login")
         self.resize(300, 200)
+        self.encryption_instance = None  # Add this line to store encryption instance
         
         layout = QVBoxLayout(self)
         
@@ -657,8 +658,8 @@ class LoginDialog(QDialog):
                     
                     if msg == 'SEND_KEY':
                         # Initialize encryption and send public key
-                        self.encryption = E2EEncryption()
-                        public_key = self.encryption.get_public_key_bytes()
+                        self.encryption_instance = E2EEncryption()  # Store instance here
+                        public_key = self.encryption_instance.get_public_key_bytes()
                         client.send(public_key)
                         
                         # Wait for final response
@@ -668,8 +669,6 @@ class LoginDialog(QDialog):
                         if response == 'AUTH_SUCCESS':
                             print("Login successful!")
                             save_credentials(username, password)
-                            # Store encryption instance for the main window
-                            self.encryption_instance = self.encryption
                             self.accept()
                             return
             
