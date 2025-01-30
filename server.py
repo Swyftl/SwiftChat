@@ -14,6 +14,7 @@ import requests
 import webbrowser
 import sys
 import subprocess
+from encryption import E2EEncryption
 
 # Version control constants
 CURRENT_VERSION = "V0.2.0"
@@ -302,6 +303,7 @@ class ServerGUI:
 
         self.clients = []
         self.nicknames = []
+        self.user_keys = {}  # Store public keys for each user
 
         def broadcast(message):
             for client in self.clients:
@@ -375,138 +377,40 @@ class ServerGUI:
                     message = client.recv(1024).decode('utf-8')
                     sender_name = self.nicknames[self.clients.index(client)]
                     
-                    # Check message length
-                    if len(message) > self.max_message_length:
-                        client.send("Message too long".encode('utf-8'))
+                    # For encrypted messages, just forward without logging content
+                    if message.startswith('KEY_EXCHANGE:') or message.startswith('PUBLIC_KEY:') or \
+                       message.startswith('SESSION_KEY:') or message.startswith('ENCRYPTED_MSG:'):
+                        # Parse recipient from message
+                        parts = message.split(':', 2)
+                        if len(parts) >= 2:
+                            recipient = parts[1]
+                            if recipient in self.nicknames:
+                                recipient_idx = self.nicknames.index(recipient)
+                                recipient_client = self.clients[recipient_idx]
+                                # Forward encrypted data without modification
+                                recipient_client.send(f"{parts[0]}:{sender_name}:{parts[2]}".encode())
+                                self.log(f"Forwarded encrypted message from {sender_name} to {recipient}")
                         continue
                     
+                    # Handle regular unencrypted messages (public chat)
                     if message == 'PING':
                         client.send('PONG'.encode('utf-8'))
                         continue
                         
-                    if message == 'IMAGE_START':  # This is the initial request for image upload
-                        self.log(f"Starting image receive from {sender_name}")
-                        try:
-                            # No timeout for initial handshake
-                            client.settimeout(None)
-                            
-                            # Send ready signal immediately
-                            client.send('READY_FOR_IMAGE'.encode('utf-8'))
-                            
-                            # Wait for size info
-                            size_info = client.recv(1024).decode('utf-8')
-                            if not size_info.startswith('SIZE:'):
-                                raise Exception("No size info received")
-                            
-                            # Extract size and verify it's reasonable
-                            total_size = int(size_info.split(':')[1])
-                            if total_size > self.max_image_size:  # Match client's 256KB limit
-                                raise Exception("Image too large")
-                            
-                            client.send('SIZE_OK'.encode('utf-8'))
-                            
-                            # Initialize image data collection
-                            image_data = []
-                            received_size = 0
-                            last_progress_log = time.time()
-                            start_time = time.time()
-                            
-                            while True:
-                                if time.time() - start_time > 60:  # Longer total timeout (60 seconds)
-                                    raise Exception("Transfer took too long")
-                                
-                                chunk = client.recv(256).decode('utf-8')  # Match client's chunk size
-                                if chunk == 'END_IMAGE':
-                                    break
-                                
-                                image_data.append(chunk)
-                                received_size += len(chunk)
-                                
-                                # Log progress every 2 seconds
-                                current_time = time.time()
-                                if current_time - last_progress_log >= 2.0:
-                                    self.log(f"Received {received_size}/{total_size} bytes")
-                                    last_progress_log = current_time
-                            
-                            if received_size >= total_size:
-                                # Broadcast with smaller chunks
-                                full_image = ''.join(image_data)
-                                broadcast(f"IMAGE_START:{sender_name}".encode('utf-8'))
-                                
-                                chunk_size = 256  # Match client's chunk size
-                                for i in range(0, len(full_image), chunk_size):
-                                    broadcast(full_image[i:i+chunk_size].encode('utf-8'))
-                                    time.sleep(0.01)  # Minimal delay between chunks
-                                
-                                broadcast('END_IMAGE'.encode('utf-8'))
-                                client.send('IMAGE_RECEIVED'.encode('utf-8'))
-                                self.log(f"Image from {sender_name} forwarded successfully")
-                            else:
-                                raise Exception(f"Incomplete transfer: {received_size}/{total_size} bytes")
-                            
-                        except Exception as e:
-                            self.log(f"Error handling image from {sender_name}: {e}")
-                            try:
-                                client.send('IMAGE_ERROR'.encode('utf-8'))
-                            except:
-                                pass
-                        finally:
-                            client.settimeout(None)
-                        continue
-
                     if message == '/online':
                         online_users = ', '.join(self.nicknames)
                         client.send(f'ONLINE_USERS:{online_users}'.encode('utf-8'))
                     elif message.startswith('/pmhistory:'):
                         _, other_user = message.split(':', 1)
                         send_pm_history(client, sender_name, other_user)
-                    elif message.startswith('/pm:'):
-                        _, recipient, content = message.split(':', 2)
-                        self.log(f"PM from {sender_name} to {recipient}: {content}")
-                        send_private_message(client, sender_name, recipient, content)
-                        # Save private message
-                        save_message(sender_name, content, recipient, True)
-                    elif message.startswith('IMAGE:'):
-                        self.log(f"Receiving image from {sender_name}")
-                        try:
-                            # Send ready signal and wait for acknowledgment
-                            client.send('READY_FOR_IMAGE'.encode('utf-8'))
-                            
-                            # Forward start marker to all clients
-                            broadcast(f"IMAGE_START:{sender_name}".encode('utf-8'))
-                            
-                            # Receive and forward image data
-                            buffer_size = 8192
-                            client.settimeout(10.0)  # 10 second timeout for image data
-                            
-                            while True:
-                                chunk = client.recv(buffer_size).decode('utf-8')
-                                if chunk == 'END_IMAGE':
-                                    broadcast('END_IMAGE'.encode('utf-8'))
-                                    self.log(f"Image forwarded successfully from {sender_name}")
-                                    break
-                                if chunk:
-                                    broadcast(chunk.encode('utf-8'))
-                                else:
-                                    raise Exception("Connection lost during image transfer")
-                                    
-                        except Exception as e:
-                            self.log(f"Error handling image from {sender_name}: {e}")
-                            try:
-                                client.send('IMAGE_ERROR'.encode('utf-8'))
-                            except:
-                                pass
-                        finally:
-                            client.settimeout(None)
-                        continue
                     else:
-                        # Handle regular message
-                        content = message.split(':', 1)[1].strip()  # Remove username from message content
+                        # For unencrypted messages, continue with normal handling
+                        content = message.split(':', 1)[1].strip()
                         broadcast(f"{sender_name}: {content}".encode('utf-8'))
-                        # Save public message with authenticated sender
                         save_message(sender_name, content)
-                        self.log(f"Message from {sender_name}: {content}")
-                except:
+                        self.log(f"Public message from {sender_name}")
+                        
+                except Exception as e:
                     index = self.clients.index(client)
                     self.clients.remove(client)
                     client.close()
@@ -546,8 +450,13 @@ class ServerGUI:
                 self.log(f"Database query result: {result}")
                 
                 if result:
+                    # Get client's public key
+                    client.send('SEND_KEY'.encode())
+                    public_key = client.recv(4096).decode()  # Larger buffer for key
+                    self.user_keys[username] = public_key
+                    
                     self.log(f"User {username} authenticated successfully")
-                    client.send('AUTH_SUCCESS'.encode('utf-8'))
+                    client.send('AUTH_SUCCESS'.encode())
                     return username
                 else:
                     self.log(f"Authentication failed for user {username}")

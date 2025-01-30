@@ -13,6 +13,8 @@ import requests
 import webbrowser
 import subprocess
 import json
+from encryption import E2EEncryption
+import base64
 
 # Version control constants
 CURRENT_VERSION = "V0.2.0"
@@ -221,7 +223,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 class ChatMainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, encryption_instance=None):
         super().__init__()
         
         # Initialize sound system
@@ -292,6 +294,10 @@ class ChatMainWindow(QMainWindow):
 
         # Load saved settings
         self.load_settings()
+
+        # Use passed encryption instance if available
+        self.encryption = encryption_instance or E2EEncryption()
+        self.secure_chats = {}  # Track encrypted chats
 
     def create_menus(self):
         menubar = self.menuBar()
@@ -369,6 +375,40 @@ class ChatMainWindow(QMainWindow):
 
     def handle_message(self, message):
         """Handle regular messages"""
+        if message.startswith('PUBLIC_KEY:'):
+            # Handle received public key
+            _, sender, key_data = message.split(':', 2)
+            try:
+                # Generate and send session key
+                session_key, encrypted_key = self.encryption.generate_session_key(key_data.encode())
+                client.send(f"SESSION_KEY:{sender}:{base64.b64encode(encrypted_key).decode()}".encode())
+                self.encryption.store_session_key(sender, session_key)
+                self.secure_chats[sender] = True
+            except Exception as e:
+                print(f"Key exchange error: {e}")
+            return
+            
+        if message.startswith('SESSION_KEY:'):
+            # Handle received session key
+            _, sender, enc_key = message.split(':', 2)
+            try:
+                session_key = self.encryption.decrypt_session_key(base64.b64decode(enc_key))
+                self.encryption.store_session_key(sender, session_key)
+                self.secure_chats[sender] = True
+            except Exception as e:
+                print(f"Session key error: {e}")
+            return
+            
+        if message.startswith('ENCRYPTED_MSG:'):
+            # Handle encrypted message
+            _, sender, enc_data = message.split(':', 2)
+            try:
+                decrypted = self.encryption.decrypt_message(sender, base64.b64decode(enc_data))
+                self.chat_display.append(f"{sender}: {decrypted}")
+            except Exception as e:
+                print(f"Decryption error: {e}")
+            return
+
         if ' joined the chat!' in message:
             self.play_sound('joined')
         elif ' left the chat!' in message:
@@ -474,6 +514,20 @@ class ChatMainWindow(QMainWindow):
         except Exception as e:
             print(f"Error loading settings: {e}")
 
+    def send_private_message(self, recipient, message):
+        """Send encrypted private message"""
+        if recipient not in self.secure_chats:
+            # Initiate key exchange
+            client.send(f"KEY_EXCHANGE:{recipient}".encode())
+            self.chat_display.append(f"Establishing secure connection with {recipient}...")
+            return
+            
+        try:
+            encrypted = self.encryption.encrypt_message(recipient, message)
+            client.send(f"ENCRYPTED_MSG:{recipient}:{base64.b64encode(encrypted).decode()}".encode())
+        except Exception as e:
+            print(f"Encryption error: {e}")
+
 class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
         super().__init__(parent)
@@ -533,6 +587,7 @@ class LoginDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("ChatApp - Login")
         self.resize(300, 200)
+        self.encryption_instance = None  # Add this line to store encryption instance
         
         layout = QVBoxLayout(self)
         
@@ -597,15 +652,25 @@ class LoginDialog(QDialog):
                     # Send password
                     client.send(password.encode('utf-8'))
                     
-                    # Wait for result
-                    response = client.recv(1024).decode('utf-8')
-                    print(f"Server response: {response}")
+                    # Wait for key request
+                    msg = client.recv(1024).decode('utf-8')
+                    print(f"Server says: {msg}")
                     
-                    if response == 'AUTH_SUCCESS':
-                        print("Login successful!")
-                        save_credentials(username, password)
-                        self.accept()
-                        return
+                    if msg == 'SEND_KEY':
+                        # Initialize encryption and send public key
+                        self.encryption_instance = E2EEncryption()  # Store instance here
+                        public_key = self.encryption_instance.get_public_key_bytes()
+                        client.send(public_key)
+                        
+                        # Wait for final response
+                        response = client.recv(1024).decode('utf-8')
+                        print(f"Server response: {response}")
+                        
+                        if response == 'AUTH_SUCCESS':
+                            print("Login successful!")
+                            save_credentials(username, password)
+                            self.accept()
+                            return
             
             self.error_label.setText("Authentication Failed")
         except Exception as e:
@@ -877,8 +942,8 @@ def main():
         # Show login dialog
         login = LoginDialog()
         if login.exec() == QDialog.DialogCode.Accepted:
-            # Show main chat window
-            window = ChatMainWindow()
+            # Show main chat window with encryption instance from login
+            window = ChatMainWindow(login.encryption_instance)
             window.show()
             return app.exec()
     

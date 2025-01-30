@@ -2147,3 +2147,4 @@ conf.env
 conf.env
 chat_settings.txt
 SwiftChatServer.spec
+__pycache__/encryption.cpython-313.pyc
