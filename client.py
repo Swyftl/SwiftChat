@@ -4,16 +4,18 @@ import pygame.mixer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QTextEdit, QMenuBar, QMenu, QDialog, QMessageBox,
-                            QListWidget, QScrollArea, QFileDialog, QInputDialog)
+                            QListWidget, QScrollArea, QFileDialog, QInputDialog,
+                            QColorDialog, QFontDialog, QCheckBox)  # Add these imports
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage, QColor
 import sys
 import requests
 import webbrowser
 import subprocess
+import json
 
 # Version control constants
-CURRENT_VERSION = "V0.1.3"
+CURRENT_VERSION = "V0.1.8"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def is_running_as_exe():
@@ -95,7 +97,7 @@ username = None
 password = None
 private_chats = {}
 CREDENTIALS_FILE = 'credentials.txt'
-SETTINGS_FILE = 'chat_settings.json'
+SETTINGS_FILE = 'chat_settings.txt'  # Changed from .json to .txt
 
 # Default settings
 DEFAULT_SETTINGS = {
@@ -278,6 +280,9 @@ class ChatMainWindow(QMainWindow):
         # Store dialogs as instance variables
         self.online_users_dialog = None
 
+        # Load saved settings
+        self.load_settings()
+
     def create_menus(self):
         menubar = self.menuBar()
         
@@ -299,29 +304,58 @@ class ChatMainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window closing"""
         try:
-            # Stop receiver thread
-            self.receiver.running = False
-            self.receiver_thread.quit()
-            self.receiver_thread.wait()
+            # Notify server we're disconnecting
+            if client:
+                try:
+                    client.send('/quit'.encode('utf-8'))
+                except:
+                    pass
+                    
+            # Stop receiver thread first
+            if hasattr(self, 'receiver'):
+                self.receiver.running = False
+                if hasattr(self, 'receiver_thread'):
+                    self.receiver_thread.quit()
+                    self.receiver_thread.wait()
             
             # Close all private chat windows
             for chat_window in private_chats.values():
                 chat_window.close()
             
-            # Close socket and cleanup
+            # Close socket last
             if client:
+                try:
+                    client.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
                 client.close()
+            
+            # Save any settings if needed
+            self.save_settings()
             
             # Accept the close event
             event.accept()
             
-            # Quit application
-            QApplication.quit()
-            
         except Exception as e:
             print(f"Error during shutdown: {e}")
-            # Force quit if cleanup fails
-            os._exit(0)
+        finally:
+            # Make sure the app quits
+            QApplication.quit()
+
+    def save_settings(self):
+        """Save current settings before exit"""
+        try:
+            settings = {
+                'font_family': self.chat_display.font().family(),
+                'font_size': self.chat_display.font().pointSize(),
+                'text_color': self.chat_display.textColor().name(),
+                'bg_color': self.chat_display.palette().color(self.chat_display.backgroundRole()).name(),
+                'sound_enabled': self.sound_enabled
+            }
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(settings, f)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
 
     def handle_message(self, message):
         """Handle regular messages"""
@@ -398,8 +432,37 @@ class ChatMainWindow(QMainWindow):
 
     def show_settings(self):
         """Show settings dialog"""
-        # Placeholder for settings dialog
-        QMessageBox.information(self, "Settings", "Settings dialog coming soon!")
+        dialog = SettingsDialog(self)
+        dialog.exec()
+
+    def load_settings(self):
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    settings = {}
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            settings[key] = value
+                    
+                    # Apply font
+                    font = QFont(
+                        settings.get('font_family', 'Arial'),
+                        int(settings.get('font_size', '10'))
+                    )
+                    self.chat_display.setFont(font)
+                    
+                    # Apply colors
+                    self.chat_display.setTextColor(QColor(settings.get('text_color', '#000000')))
+                    palette = self.chat_display.palette()
+                    palette.setColor(self.chat_display.backgroundRole(), 
+                                   QColor(settings.get('bg_color', '#ffffff')))
+                    self.chat_display.setPalette(palette)
+                    
+                    # Apply sound setting
+                    self.sound_enabled = settings.get('sound_enabled', 'true').lower() == 'true'
+        except Exception as e:
+            print(f"Error loading settings: {e}")
 
 class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
@@ -661,6 +724,136 @@ class OnlineUsersDialog(QDialog):
                 private_chats[selected_user].show()
                 private_chats[selected_user].raise_()
             self.hide()  # Change close() to hide()
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle("Chat Settings")
+        self.resize(400, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        # Font settings
+        font_layout = QHBoxLayout()
+        self.font_label = QLabel("Current Font: Default")
+        font_button = QPushButton("Change Font")
+        font_button.clicked.connect(self.choose_font)
+        font_layout.addWidget(self.font_label)
+        font_layout.addWidget(font_button)
+        layout.addLayout(font_layout)
+        
+        # Color settings
+        colors_group = QVBoxLayout()
+        
+        # Text color
+        text_color_layout = QHBoxLayout()
+        self.text_color_preview = QLabel("   ")
+        self.text_color_preview.setStyleSheet("background-color: black; border: 1px solid gray")
+        text_color_button = QPushButton("Text Color")
+        text_color_button.clicked.connect(self.choose_text_color)
+        text_color_layout.addWidget(QLabel("Text Color:"))
+        text_color_layout.addWidget(self.text_color_preview)
+        text_color_layout.addWidget(text_color_button)
+        colors_group.addLayout(text_color_layout)
+        
+        # Background color
+        bg_color_layout = QHBoxLayout()
+        self.bg_color_preview = QLabel("   ")
+        self.bg_color_preview.setStyleSheet("background-color: white; border: 1px solid gray")
+        bg_color_button = QPushButton("Background Color")
+        bg_color_button.clicked.connect(self.choose_bg_color)
+        bg_color_layout.addWidget(QLabel("Background Color:"))
+        bg_color_layout.addWidget(self.bg_color_preview)
+        bg_color_layout.addWidget(bg_color_button)
+        colors_group.addLayout(bg_color_layout)
+        
+        layout.addLayout(colors_group)
+        
+        # Sound settings
+        sound_layout = QHBoxLayout()
+        self.sound_enabled = QCheckBox("Enable Sound Effects")
+        self.sound_enabled.setChecked(self.parent.sound_enabled)
+        self.sound_enabled.stateChanged.connect(self.toggle_sound)
+        sound_layout.addWidget(self.sound_enabled)
+        layout.addLayout(sound_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        apply_button = QPushButton("Apply")
+        apply_button.clicked.connect(self.apply_settings)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(apply_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        # Store current settings
+        self.current_font = self.parent.chat_display.font()
+        self.current_text_color = self.parent.chat_display.textColor()
+        self.current_bg_color = self.parent.chat_display.palette().color(self.parent.chat_display.backgroundRole())
+        
+        # Update previews
+        self.update_font_preview()
+        self.text_color_preview.setStyleSheet(f"background-color: {self.current_text_color.name()}; border: 1px solid gray")
+        self.bg_color_preview.setStyleSheet(f"background-color: {self.current_bg_color.name()}; border: 1px solid gray")
+
+    def choose_font(self):
+        font, ok = QFontDialog.getFont(self.current_font, self)
+        if ok:
+            self.current_font = font
+            self.update_font_preview()
+
+    def choose_text_color(self):
+        color = QColorDialog.getColor(self.current_text_color, self)
+        if color.isValid():
+            self.current_text_color = color
+            self.text_color_preview.setStyleSheet(f"background-color: {color.name()}; border: 1px solid gray")
+
+    def choose_bg_color(self):
+        color = QColorDialog.getColor(self.current_bg_color, self)
+        if color.isValid():
+            self.current_bg_color = color
+            self.bg_color_preview.setStyleSheet(f"background-color: {color.name()}; border: 1px solid gray")
+
+    def update_font_preview(self):
+        self.font_label.setText(f"Current Font: {self.current_font.family()} {self.current_font.pointSize()}pt")
+
+    def toggle_sound(self, state):
+        self.parent.sound_enabled = bool(state)
+
+    def apply_settings(self):
+        # Apply to main chat
+        self.parent.chat_display.setFont(self.current_font)
+        self.parent.chat_display.setTextColor(self.current_text_color)
+        palette = self.parent.chat_display.palette()
+        palette.setColor(self.parent.chat_display.backgroundRole(), self.current_bg_color)
+        self.parent.chat_display.setPalette(palette)
+        
+        # Apply to private chat windows
+        for chat_window in private_chats.values():
+            chat_window.chat_display.setFont(self.current_font)
+            chat_window.chat_display.setTextColor(self.current_text_color)
+            palette = chat_window.chat_display.palette()
+            palette.setColor(chat_window.chat_display.backgroundRole(), self.current_bg_color)
+            chat_window.chat_display.setPalette(palette)
+        
+        # Save settings to text file
+        settings = [
+            f"font_family={self.current_font.family()}",
+            f"font_size={self.current_font.pointSize()}",
+            f"text_color={self.current_text_color.name()}",
+            f"bg_color={self.current_bg_color.name()}",
+            f"sound_enabled={str(self.sound_enabled.isChecked()).lower()}"
+        ]
+        
+        try:
+            with open(SETTINGS_FILE, 'w') as f:
+                f.write('\n'.join(settings))
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+        
+        self.accept()
 
 def main():
     app = QApplication(sys.argv)
