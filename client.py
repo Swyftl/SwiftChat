@@ -1229,7 +1229,7 @@ class FriendsDialog(QDialog):
                 private_chats[friend].show()
                 private_chats[friend].raise_()
             else:
-                chat_window = PrivateChatWindow(friend, self.parent())
+                chat_window = PrivateChatWindow(friend, self.parent)  # Changed from self.parent() to self.parent
                 private_chats[friend] = chat_window
                 chat_window.show()
             self.hide()
