@@ -22,6 +22,9 @@ from datetime import datetime  # Change the import
 CURRENT_VERSION = "V0.2.2"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
+# Global user data dictionary
+user_data = {}
+
 def is_running_as_exe():
     """Check if we're running as a bundled exe"""
     return getattr(sys, 'frozen', False)
@@ -267,9 +270,12 @@ class ConnectionDialog(QDialog):
             if profile:
                 self.host_input.setText(profile['host'])
                 self.port_input.setText(str(profile['port']))
-                global username, password
-                username = profile['username']
-                password = profile['password']
+                user_data.update({
+                    'username': profile['username'],
+                    'password': profile['password'],
+                    'host': profile['host'],
+                    'port': profile['port']
+                })
 
     def try_connect(self):
         global client, HOST, PORT
@@ -287,43 +293,87 @@ class MessageReceiver(QObject):
     private_message_received = pyqtSignal(str, str)
     online_users_received = pyqtSignal(list)
     connection_lost = pyqtSignal()
-    friends_list_received = pyqtSignal(str)  # Add new signal
+    friends_list_received = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.running = True
+        # Add buffer for incomplete messages
+        self.message_buffer = ""
+        # Configure client socket (if not already configured)
+        if client:
+            client.settimeout(0.1)  # 100ms timeout
+            # Enable TCP keepalive
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Set TCP keepalive time
+            if hasattr(socket, "TCP_KEEPIDLE"):  # Linux
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            elif hasattr(socket, "TCP_KEEPALIVE"):  # macOS
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 30)
+            # Set TCP keepalive interval
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            # Set TCP keepalive retry count
+            if hasattr(socket, "TCP_KEEPCNT"):
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
 
     def run(self):
         while self.running:
             try:
-                # Add select to prevent blocking
-                import select
-                ready = select.select([client], [], [], 0.1)  # 0.1s timeout
-                if ready[0]:
-                    message = client.recv(1024).decode('utf-8')
-                    if not message:
-                        raise ConnectionError("Connection lost")
+                try:
+                    data = client.recv(4096)  # Increased buffer size
+                    if not data:
+                        if self.running:
+                            self.connection_lost.emit()
+                            self.running = False
+                        break
+                    
+                    # Append received data to buffer
+                    self.message_buffer += data.decode('utf-8')
+                    
+                    # Process complete messages
+                    while '\n' in self.message_buffer:
+                        message, self.message_buffer = self.message_buffer.split('\n', 1)
+                        self.process_message(message)
                         
-                    if message.startswith('FRIENDS_LIST:'):
-                        _, friends_data = message.split(':', 1)
-                        self.friends_list_received.emit(friends_data)
-                    elif message.startswith('ONLINE_USERS:'):
-                        users = message.split(':')[1].split(', ')
-                        self.online_users_received.emit(users)
-                    elif message.startswith('[Private]'):
-                        sender = message[9:].split(':')[0].strip()
-                        self.private_message_received.emit(sender, message)
-                    elif message.startswith('[Private to'):
-                        recipient = message[11:].split(']')[0].strip()
-                        self.private_message_received.emit(recipient, message)
-                    else:
-                        self.message_received.emit(message)
+                except socket.timeout:
+                    # Handle timeout - just continue loop
+                    continue
+                except ConnectionResetError:
+                    if self.running:
+                        self.connection_lost.emit()
+                        self.running = False
+                    break
+                    
             except Exception as e:
                 print(f"Receiver error: {e}")
                 if self.running:
                     self.connection_lost.emit()
                     self.running = False
                 break
+
+    def process_message(self, message):
+        """Process a single complete message"""
+        try:
+            if not message:
+                return
+                
+            if message.startswith('FRIENDS_LIST:'):
+                _, friends_data = message.split(':', 1)
+                self.friends_list_received.emit(friends_data)
+            elif message.startswith('ONLINE_USERS:'):
+                users = message.split(':')[1].split(', ')
+                self.online_users_received.emit(users)
+            elif message.startswith('[Private]'):
+                sender = message[9:].split(':')[0].strip()
+                self.private_message_received.emit(sender, message)
+            elif message.startswith('[Private to'):
+                recipient = message[11:].split(']')[0].strip()
+                self.private_message_received.emit(recipient, message)
+            else:
+                self.message_received.emit(message)
+        except Exception as e:
+            print(f"Error processing message: {e}")
 
 def resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
@@ -339,6 +389,11 @@ class ChatMainWindow(QMainWindow):
     def __init__(self, encryption_instance=None):
         super().__init__()
         
+        # Initialize username from user_data
+        self.username = user_data.get('username')
+        if not self.username:
+            raise ValueError("Username not set")
+            
         # Initialize sound system
         pygame.mixer.init()
         self.sound_enabled = True
@@ -501,7 +556,7 @@ class ChatMainWindow(QMainWindow):
             try:
                 # Generate and send session key
                 session_key, encrypted_key = self.encryption.generate_session_key(key_data.encode())
-                client.send(f"SESSION_KEY:{sender}:{base64.b64encode(encrypted_key).decode()}".encode())
+                client.send(f"SESSION_KEY:{sender}:{base64.b64encode(encrypted_key).decode()}\n".encode())
                 self.encryption.store_session_key(sender, session_key)
                 self.secure_chats[sender] = True
             except Exception as e:
@@ -544,7 +599,7 @@ class ChatMainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             accept = "accept" if response == QMessageBox.StandardButton.Yes else "reject"
-            client.send(f"FRIEND_RESPONSE:{sender}:{accept}".encode())
+            client.send(f"FRIEND_RESPONSE:{sender}:{accept}\n".encode())
             return
             
         if message.startswith('FRIEND_RESPONSE_RECEIVED:'):
@@ -555,7 +610,7 @@ class ChatMainWindow(QMainWindow):
                 f"{sender} has {status} your friend request."
             )
             # Refresh friends list
-            client.send('GET_FRIENDS'.encode())
+            client.send('GET_FRIENDS\n'.encode())
             return
             
         if message.startswith('FRIEND_STATUS:'):
@@ -578,7 +633,7 @@ class ChatMainWindow(QMainWindow):
             self.play_sound('joined')
         elif ' left the chat!' in message:
             self.play_sound('left')
-        elif not message.startswith((f'{username}:', 'MESSAGE_HISTORY', '===')):
+        elif not message.startswith((f'{self.username}:', 'MESSAGE_HISTORY', '===')):
             self.play_sound('received')
         
         self.chat_display.append(message + '\n')
@@ -595,11 +650,11 @@ class ChatMainWindow(QMainWindow):
         message = self.message_input.text()
         if message and client:
             try:
-                client.send(f'{username}: {message}'.encode('utf-8'))
+                client.send(f'{self.username}: {message}\n'.encode('utf-8'))
                 self.message_input.clear()
                 self.play_sound('sent')  # Play sent sound
-            except:
-                QMessageBox.warning(self, "Error", "Failed to send message")
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to send message: {str(e)}")
 
     def play_sound(self, sound_type):
         """Play notification sound"""
@@ -683,13 +738,13 @@ class ChatMainWindow(QMainWindow):
         """Send encrypted private message"""
         if recipient not in self.secure_chats:
             # Initiate key exchange
-            client.send(f"KEY_EXCHANGE:{recipient}".encode())
+            client.send(f"KEY_EXCHANGE:{recipient}\n".encode())
             self.chat_display.append(f"Establishing secure connection with {recipient}...")
             return
             
         try:
             encrypted = self.encryption.encrypt_message(recipient, message)
-            client.send(f"ENCRYPTED_MSG:{recipient}:{base64.b64encode(encrypted).decode()}".encode())
+            client.send(f"ENCRYPTED_MSG:{recipient}:{base64.b64encode(encrypted).decode()}\n".encode())
         except Exception as e:
             print(f"Encryption error: {e}")
 
@@ -699,7 +754,7 @@ class ChatMainWindow(QMainWindow):
             self.friends_dialog = FriendsDialog(self)
             # Request friends list after dialog is created
             try:
-                client.send('GET_FRIENDS'.encode())
+                client.send('GET_FRIENDS\n'.encode())
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to request friends list: {str(e)}")
         self.friends_dialog.show()
@@ -759,10 +814,11 @@ class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
         message = self.message_input.text()
         if message and client:
             try:
-                client.send(f'/pm:{self.other_user}:{message}'.encode('utf-8'))
+                # Add newline terminator to message
+                client.send(f'/pm:{self.other_user}:{message}\n'.encode('utf-8'))
                 self.message_input.clear()
-            except:
-                QMessageBox.warning(self, "Error", "Failed to send message")
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to send message: {str(e)}")
 
 class LoginDialog(QDialog):
     def __init__(self, parent=None):
@@ -810,58 +866,68 @@ class LoginDialog(QDialog):
             self.password_input.setText(creds.get('password', ''))
 
         # Pre-fill credentials if they're set from profile
-        if username and password:
-            self.username_input.setText(username)
-            self.password_input.setText(password)
+        if user_data.get('username') and user_data.get('password'):
+            self.username_input.setText(user_data['username'])
+            self.password_input.setText(user_data['password'])
             # Optionally auto-login
             QTimer.singleShot(0, self.try_login)
 
     def try_login(self):
-        global username, password
-        username = self.username_input.text()
-        password = self.password_input.text()
-        
         try:
+            username = self.username_input.text()
+            password = self.password_input.text()
+            
             print(f"Attempting to log in as {username}")
-            client.send('LOGIN'.encode('utf-8'))
+            client.send('LOGIN\n'.encode('utf-8'))
             
-            # Wait for USER request
-            msg = client.recv(1024).decode('utf-8')
-            print(f"Server says: {msg}")
+            # Wait for USER prompt
+            response = client.recv(1024).decode('utf-8').strip()
+            print(f"Server response: {response}")
             
-            if msg == 'USER':
-                # Send username
-                client.send(username.encode('utf-8'))
+            if response != 'USER':
+                raise Exception("Unexpected server response")
                 
-                # Wait for PASS request
-                msg = client.recv(1024).decode('utf-8')
-                print(f"Server says: {msg}")
-                
-                if msg == 'PASS':
-                    # Send password
-                    client.send(password.encode('utf-8'))
-                    
-                    # Wait for key request
-                    msg = client.recv(1024).decode('utf-8')
-                    print(f"Server says: {msg}")
-                    
-                    if msg == 'SEND_KEY':
-                        # Initialize encryption and send public key
-                        self.encryption_instance = E2EEncryption()  # Store instance here
-                        public_key = self.encryption_instance.get_public_key_bytes()
-                        client.send(public_key)
-                        
-                        # Wait for final response
-                        response = client.recv(1024).decode('utf-8')
-                        print(f"Server response: {response}")
-                        
-                        if response == 'AUTH_SUCCESS':
-                            print("Login successful!")
-                            save_credentials(username, password)
-                            self.accept()
-                            return
+            # Send username
+            client.send(f"{username}\n".encode('utf-8'))
             
-            self.error_label.setText("Authentication Failed")
+            # Wait for PASS prompt
+            response = client.recv(1024).decode('utf-8').strip()
+            print(f"Server response: {response}")
+            
+            if response != 'PASS':
+                raise Exception("Unexpected server response")
+                
+            # Send password
+            client.send(f"{password}\n".encode('utf-8'))
+            
+            # Wait for key exchange request
+            response = client.recv(1024).decode('utf-8').strip()
+            print(f"Server response: {response}")
+            
+            if response != 'SEND_KEY':
+                raise Exception("Key exchange failed")
+                
+            # Send public key
+            self.encryption_instance = E2EEncryption()
+            public_key = self.encryption_instance.get_public_key_bytes()
+            client.send(public_key)
+            
+            # Wait for authentication result
+            response = client.recv(1024).decode('utf-8').strip()
+            print(f"Final server response: {response}")
+            
+            if response == 'AUTH_SUCCESS':
+                print("Login successful!")
+                user_data.update({
+                    'username': username,
+                    'password': password
+                })
+                save_credentials(username, password)
+                self.accept()
+            else:
+                print(f"Authentication failed: {response}")
+                self.error_label.setText("Authentication Failed")
+                
         except Exception as e:
             print(f"Login error: {str(e)}")
             self.error_label.setText(f"Login failed: {str(e)}")
@@ -911,18 +977,18 @@ class RegisterDialog(QDialog):
         password = self.password_input.text()
         
         try:
-            client.send('REGISTER'.encode('utf-8'))
+            client.send('REGISTER\n'.encode('utf-8'))
             
             msg = client.recv(1024).decode('utf-8')
             if msg == 'NEW_USER':
-                client.send(username.encode('utf-8'))
+                client.send(f"{username}\n".encode('utf-8'))
                 
                 msg = client.recv(1024).decode('utf-8')
                 if msg == 'USER_EXISTS':
                     self.error_label.setText("Username already exists")
                     return
                 elif msg == 'NEW_PASS':
-                    client.send(password.encode('utf-8'))
+                    client.send(f"{password}\n".encode('utf-8'))
                     
                     response = client.recv(1024).decode('utf-8')
                     if response == 'REG_SUCCESS':
@@ -937,16 +1003,19 @@ class RegisterDialog(QDialog):
 class OnlineUsersDialog(QDialog):
     def __init__(self, users_list, parent=None):
         super().__init__(parent)
+        self.parent = parent
         self.setWindowTitle("Online Users")
         self.resize(200, 300)
-        self.parent = parent  # Store parent reference
+        
+        # Store username reference from parent
+        self.username = self.parent.username if self.parent else None
         
         layout = QVBoxLayout(self)
         
         # Users list
         self.users_list = QListWidget()
         for user in users_list:
-            if user != username:  # Now username is accessible as global
+            if user != self.username:  # Use instance variable instead of global
                 self.users_list.addItem(user)
         layout.addWidget(self.users_list)
         
@@ -967,7 +1036,7 @@ class OnlineUsersDialog(QDialog):
         """Update the users list"""
         self.users_list.clear()
         for user in users_list:
-            if user != username:
+            if user != self.username:  # Use instance variable
                 self.users_list.addItem(user)
 
     def closeEvent(self, event):
@@ -1123,6 +1192,8 @@ class FriendsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
+        # Store username reference from parent
+        self.username = self.parent.username if self.parent else None
         self.setWindowTitle("Friends List")
         self.resize(300, 400)
         
@@ -1184,7 +1255,7 @@ class FriendsDialog(QDialog):
                 return
                 
             self.status_label.setText("Refreshing friends list...")
-            client.send('GET_FRIENDS'.encode())
+            client.send('GET_FRIENDS\n'.encode())
         except Exception as e:
             self.status_label.setText(f"Error: {str(e)}")
 
@@ -1209,12 +1280,12 @@ class FriendsDialog(QDialog):
         """Send friend request"""
         friend = self.add_input.text().strip()
         if friend:
-            if friend == username:
+            if friend == self.username:  # Use instance variable
                 QMessageBox.warning(self, "Error", "You cannot add yourself as a friend")
                 return
                 
             try:
-                client.send(f"FRIEND_REQUEST:{friend}".encode())
+                client.send(f"FRIEND_REQUEST:{friend}\n".encode())
                 self.add_input.clear()
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Failed to send friend request: {str(e)}")
@@ -1246,10 +1317,16 @@ def main():
         # Show login dialog
         login = LoginDialog()
         if login.exec() == QDialog.DialogCode.Accepted:
-            # Show main chat window with encryption instance from login
-            window = ChatMainWindow(login.encryption_instance)
-            window.show()
-            return app.exec()
+            try:
+                # Create main window with user data
+                window = ChatMainWindow(login.encryption_instance)
+                if not user_data.get('username'):
+                    raise ValueError("No username set")
+                window.username = user_data['username']
+                window.show()
+                return app.exec()
+            except Exception as e:
+                QMessageBox.critical(None, "Error", f"Failed to start chat: {str(e)}")
     
     return 1
 
