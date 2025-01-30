@@ -16,7 +16,7 @@ import sys
 import subprocess
 
 # Version control constants
-CURRENT_VERSION = "V0.1.7"
+CURRENT_VERSION = "V0.2.0"
 GITHUB_REPO = "swyftl/swiftChat"  # Replace with your actual GitHub repo
 
 def is_running_as_exe():
