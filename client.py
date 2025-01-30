@@ -3,11 +3,11 @@ import os
 import pygame.mixer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
-                            QTextEdit, QMenuBar, QMenu, QDialog, QMessageBox,
-                            QListWidget, QScrollArea, QFileDialog, QInputDialog,
+                            QTextEdit, QDialog, QMessageBox,
+                            QListWidget,
                             QColorDialog, QFontDialog, QCheckBox)  # Add these imports
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage, QColor
+from PyQt6.QtGui import QFont, QColor
 import sys
 import requests
 import webbrowser
