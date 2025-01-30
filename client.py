@@ -4,9 +4,9 @@ import pygame.mixer
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QTextEdit, QDialog, QMessageBox,
-                            QListWidget,
+                            QListWidget, QComboBox, QFormLayout,  # Add QComboBox, QFormLayout
                             QColorDialog, QFontDialog, QCheckBox)  # Add these imports
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject, QTimer  # Add QTimer
 from PyQt6.QtGui import QFont, QColor
 import sys
 import requests
@@ -15,6 +15,7 @@ import subprocess
 import json
 from encryption import E2EEncryption
 import base64
+from profiles import ProfileManager  # Add this import
 
 # Version control constants
 CURRENT_VERSION = "V0.2.0"
@@ -134,11 +135,100 @@ def save_credentials(username, password, host=None, port=None):
     except Exception as e:
         print(f"Error saving credentials: {e}")
 
+class ProfileDialog(QDialog):
+    def __init__(self, profile_manager, parent=None):
+        super().__init__(parent)
+        self.profile_manager = profile_manager
+        self.setWindowTitle("Profile Management")
+        self.resize(400, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        # Profile list
+        self.profile_list = QListWidget()
+        self.profile_list.addItems(profile_manager.get_profile_names())
+        layout.addWidget(self.profile_list)
+        
+        # Profile details
+        form_layout = QFormLayout()
+        self.name_input = QLineEdit()
+        self.username_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.host_input = QLineEdit()
+        self.port_input = QLineEdit()
+        
+        form_layout.addRow("Profile Name:", self.name_input)
+        form_layout.addRow("Username:", self.username_input)
+        form_layout.addRow("Password:", self.password_input)
+        form_layout.addRow("Host:", self.host_input)
+        form_layout.addRow("Port:", self.port_input)
+        layout.addLayout(form_layout)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        save_button = QPushButton("Save Profile")
+        delete_button = QPushButton("Delete Profile")
+        close_button = QPushButton("Close")
+        
+        save_button.clicked.connect(self.save_profile)
+        delete_button.clicked.connect(self.delete_profile)
+        close_button.clicked.connect(self.accept)
+        
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(delete_button)
+        button_layout.addWidget(close_button)
+        layout.addLayout(button_layout)
+        
+        # Connect selection changed
+        self.profile_list.currentItemChanged.connect(self.profile_selected)
+
+    def profile_selected(self, current):
+        if current:
+            profile = self.profile_manager.get_profile(current.text())
+            if profile:
+                self.name_input.setText(current.text())
+                self.username_input.setText(profile['username'])
+                self.password_input.setText(profile['password'])
+                self.host_input.setText(profile['host'])
+                self.port_input.setText(str(profile['port']))
+
+    def save_profile(self):
+        name = self.name_input.text()
+        if name:
+            self.profile_manager.add_profile(
+                name,
+                self.username_input.text(),
+                self.password_input.text(),
+                self.host_input.text(),
+                self.port_input.text()
+            )
+            self.profile_list.clear()
+            self.profile_list.addItems(self.profile_manager.get_profile_names())
+
+    def delete_profile(self):
+        current = self.profile_list.currentItem()
+        if current:
+            self.profile_manager.delete_profile(current.text())
+            self.profile_list.clear()
+            self.profile_list.addItems(self.profile_manager.get_profile_names())
+
 class ConnectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.profile_manager = ProfileManager()
         self.setWindowTitle("ChatApp - Connect to Server")
         layout = QVBoxLayout(self)
+
+        # Profile selection
+        profile_layout = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(self.profile_manager.get_profile_names())
+        profile_button = QPushButton("Manage Profiles")
+        profile_layout.addWidget(QLabel("Profile:"))
+        profile_layout.addWidget(self.profile_combo)
+        profile_layout.addWidget(profile_button)
+        layout.addLayout(profile_layout)
 
         # Server address
         layout.addWidget(QLabel("Server Address:"))
@@ -160,8 +250,25 @@ class ConnectionDialog(QDialog):
         self.error_label.setStyleSheet("color: red")
         layout.addWidget(self.error_label)
 
-        # Load saved credentials
-        self.load_saved_connection()
+        # Connect signals
+        profile_button.clicked.connect(self.manage_profiles)
+        self.profile_combo.currentTextChanged.connect(self.load_profile)
+
+    def manage_profiles(self):
+        dialog = ProfileDialog(self.profile_manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.profile_combo.clear()
+            self.profile_combo.addItems(self.profile_manager.get_profile_names())
+
+    def load_profile(self, profile_name):
+        if profile_name:
+            profile = self.profile_manager.get_profile(profile_name)
+            if profile:
+                self.host_input.setText(profile['host'])
+                self.port_input.setText(str(profile['port']))
+                global username, password
+                username = profile['username']
+                password = profile['password']
 
     def try_connect(self):
         global client, HOST, PORT
@@ -173,12 +280,6 @@ class ConnectionDialog(QDialog):
             self.accept()
         except Exception as e:
             self.error_label.setText(f"Connection failed: {str(e)}")
-
-    def load_saved_connection(self):
-        saved = load_credentials()
-        if saved:
-            self.host_input.setText(saved.get('host', HOST))
-            self.port_input.setText(saved.get('port', str(PORT)))
 
 class MessageReceiver(QObject):
     message_received = pyqtSignal(str)
@@ -626,6 +727,13 @@ class LoginDialog(QDialog):
         if creds:
             self.username_input.setText(creds.get('username', ''))
             self.password_input.setText(creds.get('password', ''))
+
+        # Pre-fill credentials if they're set from profile
+        if username and password:
+            self.username_input.setText(username)
+            self.password_input.setText(password)
+            # Optionally auto-login
+            QTimer.singleShot(0, self.try_login)
 
     def try_login(self):
         global username, password
