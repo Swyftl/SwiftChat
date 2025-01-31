@@ -379,118 +379,139 @@ class MessageReceiver(QObject):
             print(f"Error processing message: {e}")
 
 def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller"""
+    """Get absolute path to resource, works for dev and for PyInstaller/Nuitka"""
     try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    
-    return os.path.join(base_path, relative_path)
+        # Check if we're running as compiled
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.abspath(".")
+        
+        return os.path.join(base_path, relative_path)
+    except Exception as e:
+        print(f"Error resolving resource path: {e}")
+        return relative_path
 
 class ChatMainWindow(QMainWindow):
     def __init__(self, encryption_instance=None):
-        super().__init__()
-        
-        # Initialize username from user_data
-        self.username = user_data.get('username')
-        if not self.username:
-            raise ValueError("Username not set")
-            
-        # Initialize sound system
-        pygame.mixer.init()
-        self.sound_enabled = True
         try:
-            self.sounds = {
-                'sent': pygame.mixer.Sound(resource_path('resources/sounds/message_sent.mp3')),
-                'received': pygame.mixer.Sound(resource_path('resources/sounds/message_received.mp3')),
-                'joined': pygame.mixer.Sound(resource_path('resources/sounds/user_joined.mp3')),
-                'left': pygame.mixer.Sound(resource_path('resources/sounds/user_left.mp3')),
-                'dm_start': pygame.mixer.Sound(resource_path('resources/sounds/DM_Started.mp3'))
-            }
+            super().__init__()
+            
+            # Initialize username from user_data
+            self.username = user_data.get('username')
+            if not self.username:
+                raise ValueError("Username not set")
+                
+            # Initialize sound system with better error handling
+            try:
+                pygame.mixer.init()
+                self.sound_enabled = True
+                self.sounds = {}
+                sound_files = {
+                    'sent': 'message_sent.mp3',
+                    'received': 'message_received.mp3',
+                    'joined': 'user_joined.mp3',
+                    'left': 'user_left.mp3',
+                    'dm_start': 'DM_Started.mp3'
+                }
+                
+                for sound_name, file_name in sound_files.items():
+                    try:
+                        sound_path = resource_path(os.path.join('resources', 'sounds', file_name))
+                        if os.path.exists(sound_path):
+                            self.sounds[sound_name] = pygame.mixer.Sound(sound_path)
+                        else:
+                            print(f"Sound file not found: {sound_path}")
+                    except Exception as e:
+                        print(f"Error loading sound {sound_name}: {e}")
+                
+            except Exception as e:
+                print(f"Error initializing sound system: {e}")
+                self.sound_enabled = False
+            
+            self.setWindowTitle("ChatApp")
+            self.resize(800, 600)
+            
+            # Central widget
+            central_widget = QWidget()
+            self.setCentralWidget(central_widget)
+            layout = QVBoxLayout(central_widget)
+            
+            # Chat display
+            self.chat_display = QTextEdit()
+            self.chat_display.setReadOnly(True)
+            layout.addWidget(self.chat_display)
+            
+            # Message input area
+            input_layout = QHBoxLayout()
+            self.message_input = QLineEdit()
+            self.message_input.returnPressed.connect(self.write)
+            self.send_button = QPushButton("Send")
+            self.send_button.clicked.connect(self.write)
+            input_layout.addWidget(self.message_input)
+            input_layout.addWidget(self.send_button)
+            layout.addLayout(input_layout)
+            
+            # Add connection status
+            self.status_label = QLabel("Connected")
+            layout.addWidget(self.status_label)
+            
+            # Keep running flag
+            self.running = True
+            
+            # Setup menu bar
+            self.create_menus()
+            
+            # Setup message receiver
+            self.receiver = MessageReceiver()
+            self.receiver_thread = QThread()
+            self.receiver.moveToThread(self.receiver_thread)
+            
+            # Connect signals
+            self.receiver.message_received.connect(self.handle_message)
+            self.receiver.private_message_received.connect(self.handle_private_message)
+            self.receiver.online_users_received.connect(self.show_online_users_dialog)
+            self.receiver.connection_lost.connect(self.handle_connection_lost)
+            self.receiver.friends_list_received.connect(self.update_friends_list)
+            
+            # Start receiver thread
+            self.receiver_thread.started.connect(self.receiver.run)
+            self.receiver_thread.start()
+
+            # Store dialogs as instance variables
+            self.online_users_dialog = None
+
+            # Load saved settings
+            self.load_settings()
+
+            # Use passed encryption instance if available
+            self.encryption = encryption_instance or E2EEncryption()
+            self.secure_chats = {}  # Track encrypted chats
+
+            self.friends_dialog = None
+
+            # Apply custom classes
+            self.message_input.setProperty('class', 'message-input')
+            self.send_button.setProperty('class', 'send-button')
+            self.chat_display.setProperty('class', 'chat-window')
+            
+            # Set window minimum size
+            self.setMinimumSize(600, 400)
+            
+            # Add margins to layout
+            layout = self.centralWidget().layout()
+            layout.setContentsMargins(20, 20, 20, 20)
+            layout.setSpacing(10)
+
+            # Add theme attribute
+            self.current_theme = "Light"
+
+            # Load and apply saved settings
+            self.apply_saved_settings()
+
         except Exception as e:
-            print(f"Could not load notification sounds: {e}")
-            self.sound_enabled = False
-        
-        self.setWindowTitle("ChatApp")
-        self.resize(800, 600)
-        
-        # Central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-        
-        # Chat display
-        self.chat_display = QTextEdit()
-        self.chat_display.setReadOnly(True)
-        layout.addWidget(self.chat_display)
-        
-        # Message input area
-        input_layout = QHBoxLayout()
-        self.message_input = QLineEdit()
-        self.message_input.returnPressed.connect(self.write)
-        self.send_button = QPushButton("Send")
-        self.send_button.clicked.connect(self.write)
-        input_layout.addWidget(self.message_input)
-        input_layout.addWidget(self.send_button)
-        layout.addLayout(input_layout)
-        
-        # Add connection status
-        self.status_label = QLabel("Connected")
-        layout.addWidget(self.status_label)
-        
-        # Keep running flag
-        self.running = True
-        
-        # Setup menu bar
-        self.create_menus()
-        
-        # Setup message receiver
-        self.receiver = MessageReceiver()
-        self.receiver_thread = QThread()
-        self.receiver.moveToThread(self.receiver_thread)
-        
-        # Connect signals
-        self.receiver.message_received.connect(self.handle_message)
-        self.receiver.private_message_received.connect(self.handle_private_message)
-        self.receiver.online_users_received.connect(self.show_online_users_dialog)
-        self.receiver.connection_lost.connect(self.handle_connection_lost)
-        self.receiver.friends_list_received.connect(self.update_friends_list)
-        
-        # Start receiver thread
-        self.receiver_thread.started.connect(self.receiver.run)
-        self.receiver_thread.start()
-
-        # Store dialogs as instance variables
-        self.online_users_dialog = None
-
-        # Load saved settings
-        self.load_settings()
-
-        # Use passed encryption instance if available
-        self.encryption = encryption_instance or E2EEncryption()
-        self.secure_chats = {}  # Track encrypted chats
-
-        self.friends_dialog = None
-
-        # Apply custom classes
-        self.message_input.setProperty('class', 'message-input')
-        self.send_button.setProperty('class', 'send-button')
-        self.chat_display.setProperty('class', 'chat-window')
-        
-        # Set window minimum size
-        self.setMinimumSize(600, 400)
-        
-        # Add margins to layout
-        layout = self.centralWidget().layout()
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
-
-        # Add theme attribute
-        self.current_theme = "Light"
-
-        # Load and apply saved settings
-        self.apply_saved_settings()
+            QMessageBox.critical(None, "Initialization Error", f"Failed to initialize chat window: {str(e)}")
+            raise
 
     def create_menus(self):
         menubar = self.menuBar()
