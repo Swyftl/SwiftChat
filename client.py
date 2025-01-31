@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                             QTextEdit, QDialog, QMessageBox,
                             QListWidget, QComboBox, QFormLayout,  # Add QComboBox, QFormLayout
-                            QColorDialog, QFontDialog, QCheckBox, QListWidgetItem)  # Add these imports
+                            QColorDialog, QFontDialog, QCheckBox, QListWidgetItem,
+                            QTabWidget, QSpinBox, QGroupBox, QScrollArea)  # Add these imports
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, QObject, QTimer  # Add QTimer
 from PyQt6.QtGui import QFont, QColor
 import sys
@@ -17,6 +18,8 @@ from encryption import E2EEncryption
 import base64
 from profiles import ProfileManager  # Add this import
 from datetime import datetime  # Change the import
+from styles import MODERN_STYLE  # Add this import
+from themes import THEMES  # Add this import
 
 # Version control constants
 CURRENT_VERSION = "V0.2.3"
@@ -470,6 +473,25 @@ class ChatMainWindow(QMainWindow):
 
         self.friends_dialog = None
 
+        # Apply custom classes
+        self.message_input.setProperty('class', 'message-input')
+        self.send_button.setProperty('class', 'send-button')
+        self.chat_display.setProperty('class', 'chat-window')
+        
+        # Set window minimum size
+        self.setMinimumSize(600, 400)
+        
+        # Add margins to layout
+        layout = self.centralWidget().layout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        # Add theme attribute
+        self.current_theme = "Light"
+
+        # Load and apply saved settings
+        self.apply_saved_settings()
+
     def create_menus(self):
         menubar = self.menuBar()
         
@@ -489,8 +511,8 @@ class ChatMainWindow(QMainWindow):
         
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
-        customize_action = settings_menu.addAction("Customize Chat")
-        customize_action.triggered.connect(self.show_settings)
+        settings_action = settings_menu.addAction("Settings")
+        settings_action.triggered.connect(self.show_settings)
 
     def closeEvent(self, event):
         """Handle window closing"""
@@ -731,6 +753,11 @@ class ChatMainWindow(QMainWindow):
                     
                     # Apply sound setting
                     self.sound_enabled = settings.get('sound_enabled', 'true').lower() == 'true'
+
+                    # Load theme
+                    self.current_theme = settings.get('theme', 'Light')
+                    if self.current_theme in THEMES:
+                        QApplication.instance().setStyleSheet(THEMES[self.current_theme]["style"])
         except Exception as e:
             print(f"Error loading settings: {e}")
 
@@ -764,6 +791,46 @@ class ChatMainWindow(QMainWindow):
         """Update friends list when data received"""
         if self.friends_dialog and self.friends_dialog.isVisible():
             self.friends_dialog.update_friends_list(friends_data)
+
+    def apply_saved_settings(self):
+        """Apply saved settings on startup"""
+        settings = self.load_settings()
+        
+        # Apply theme
+        self.current_theme = settings.get('theme', 'Light')
+        if self.current_theme in THEMES:
+            QApplication.instance().setStyleSheet(THEMES[self.current_theme]["style"])
+        
+        # Apply font
+        font = QFont(
+            settings.get('font_family', 'Arial'),
+            int(settings.get('font_size', '10'))
+        )
+        self.chat_display.setFont(font)
+        
+        # Apply colors
+        self.chat_display.setTextColor(QColor(settings.get('text_color', '#000000')))
+        palette = self.chat_display.palette()
+        palette.setColor(self.chat_display.backgroundRole(), 
+                        QColor(settings.get('bg_color', '#ffffff')))
+        self.chat_display.setPalette(palette)
+        
+        # Apply sound settings
+        self.sound_enabled = settings.get('sound_enabled', 'true').lower() == 'true'
+
+    def load_settings(self):
+        """Load settings with defaults"""
+        settings = DEFAULT_SETTINGS.copy()
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            settings[key] = value
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+        return settings
 
 class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
     def __init__(self, other_user, parent=None):
@@ -803,6 +870,19 @@ class PrivateChatWindow(QMainWindow):  # Change from QWidget to QMainWindow
         
         # Handle window close
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+        # Apply custom classes
+        self.message_input.setProperty('class', 'message-input')
+        self.send_button.setProperty('class', 'send-button')
+        self.chat_display.setProperty('class', 'chat-window')
+        
+        # Set window minimum size
+        self.setMinimumSize(400, 300)
+        
+        # Add margins to layout
+        layout = self.centralWidget().layout()
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
 
     def closeEvent(self, event):
         """Hide instead of close"""
@@ -1062,122 +1142,255 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent = parent
-        self.setWindowTitle("Chat Settings")
-        self.resize(400, 300)
+        self.setWindowTitle("Settings")
+        self.resize(500, 400)
         
         layout = QVBoxLayout(self)
         
-        # Font settings
-        font_layout = QHBoxLayout()
-        self.font_label = QLabel("Current Font: Default")
-        font_button = QPushButton("Change Font")
-        font_button.clicked.connect(self.choose_font)
-        font_layout.addWidget(self.font_label)
-        font_layout.addWidget(font_button)
-        layout.addLayout(font_layout)
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
         
-        # Color settings
-        colors_group = QVBoxLayout()
-        
-        # Text color
-        text_color_layout = QHBoxLayout()
-        self.text_color_preview = QLabel("   ")
-        self.text_color_preview.setStyleSheet("background-color: black; border: 1px solid gray")
-        text_color_button = QPushButton("Text Color")
-        text_color_button.clicked.connect(self.choose_text_color)
-        text_color_layout.addWidget(QLabel("Text Color:"))
-        text_color_layout.addWidget(self.text_color_preview)
-        text_color_layout.addWidget(text_color_button)
-        colors_group.addLayout(text_color_layout)
-        
-        # Background color
-        bg_color_layout = QHBoxLayout()
-        self.bg_color_preview = QLabel("   ")
-        self.bg_color_preview.setStyleSheet("background-color: white; border: 1px solid gray")
-        bg_color_button = QPushButton("Background Color")
-        bg_color_button.clicked.connect(self.choose_bg_color)
-        bg_color_layout.addWidget(QLabel("Background Color:"))
-        bg_color_layout.addWidget(self.bg_color_preview)
-        bg_color_layout.addWidget(bg_color_button)
-        colors_group.addLayout(bg_color_layout)
-        
-        layout.addLayout(colors_group)
-        
-        # Sound settings
-        sound_layout = QHBoxLayout()
-        self.sound_enabled = QCheckBox("Enable Sound Effects")
-        self.sound_enabled.setChecked(self.parent.sound_enabled)
-        self.sound_enabled.stateChanged.connect(self.toggle_sound)
-        sound_layout.addWidget(self.sound_enabled)
-        layout.addLayout(sound_layout)
+        # Add tabs
+        self.add_general_tab()
+        self.add_appearance_tab()
+        self.add_notifications_tab()
+        self.add_privacy_tab()
         
         # Buttons
         button_layout = QHBoxLayout()
         apply_button = QPushButton("Apply")
-        apply_button.clicked.connect(self.apply_settings)
         cancel_button = QPushButton("Cancel")
+        apply_button.clicked.connect(self.apply_settings)
         cancel_button.clicked.connect(self.reject)
         button_layout.addWidget(apply_button)
         button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
         
-        # Store current settings
-        self.current_font = self.parent.chat_display.font()
-        self.current_text_color = self.parent.chat_display.textColor()
-        self.current_bg_color = self.parent.chat_display.palette().color(self.parent.chat_display.backgroundRole())
+        # Load current settings
+        self.load_current_settings()
+
+    def add_general_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        general_widget = QWidget()
+        layout = QVBoxLayout(general_widget)
+        
+        # Message Settings
+        msg_group = QGroupBox("Message Settings")
+        msg_layout = QVBoxLayout()
+        
+        self.show_timestamps = QCheckBox("Show timestamps")
+        self.message_preview = QCheckBox("Show message previews")
+        self.auto_scroll = QCheckBox("Auto-scroll to new messages")
+        
+        msg_layout.addWidget(self.show_timestamps)
+        msg_layout.addWidget(self.message_preview)
+        msg_layout.addWidget(self.auto_scroll)
+        msg_group.setLayout(msg_layout)
+        layout.addWidget(msg_group)
+        
+        # History Settings
+        history_group = QGroupBox("History Settings")
+        history_layout = QFormLayout()
+        
+        self.history_limit = QSpinBox()
+        self.history_limit.setRange(10, 1000)
+        self.history_limit.setSingleStep(10)
+        
+        history_layout.addRow("Message history limit:", self.history_limit)
+        history_group.setLayout(history_layout)
+        layout.addWidget(history_group)
+        
+        scroll.setWidget(general_widget)
+        self.tab_widget.addTab(scroll, "General")
+
+    def add_appearance_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        appearance_widget = QWidget()
+        layout = QVBoxLayout(appearance_widget)
+        
+        # Theme Selection
+        theme_group = QGroupBox("Theme")
+        theme_layout = QHBoxLayout()
+        theme_layout.addWidget(QLabel("Theme:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(THEMES.keys())
+        self.theme_combo.currentTextChanged.connect(self.preview_theme)
+        theme_layout.addWidget(self.theme_combo)
+        theme_group.setLayout(theme_layout)
+        layout.addWidget(theme_group)
+        
+        # Font Settings
+        font_group = QGroupBox("Font")
+        font_layout = QVBoxLayout()
+        
+        font_button = QPushButton("Change Font")
+        font_button.clicked.connect(self.choose_font)
+        self.font_label = QLabel("Current Font: Default")
+        
+        font_layout.addWidget(self.font_label)
+        font_layout.addWidget(font_button)
+        font_group.setLayout(font_layout)
+        layout.addWidget(font_group)
+        
+        # Colors
+        colors_group = QGroupBox("Colors")
+        colors_layout = QVBoxLayout()
+        
+        # Text color
+        text_color_layout = QHBoxLayout()
+        self.text_color_preview = QLabel("   ")
+        text_color_button = QPushButton("Text Color")
+        text_color_button.clicked.connect(self.choose_text_color)
+        text_color_layout.addWidget(QLabel("Text:"))
+        text_color_layout.addWidget(self.text_color_preview)
+        text_color_layout.addWidget(text_color_button)
+        colors_layout.addLayout(text_color_layout)
+        
+        # Background color
+        bg_color_layout = QHBoxLayout()
+        self.bg_color_preview = QLabel("   ")
+        bg_color_button = QPushButton("Background Color")
+        bg_color_button.clicked.connect(self.choose_bg_color)
+        bg_color_layout.addWidget(QLabel("Background:"))
+        bg_color_layout.addWidget(self.bg_color_preview)
+        bg_color_layout.addWidget(bg_color_button)
+        colors_layout.addLayout(bg_color_layout)
+        
+        colors_group.setLayout(colors_layout)
+        layout.addWidget(colors_group)
+        
+        scroll.setWidget(appearance_widget)
+        self.tab_widget.addTab(scroll, "Appearance")
+
+    def add_notifications_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        notifications_widget = QWidget()
+        layout = QVBoxLayout(notifications_widget)
+        
+        # Sound Settings
+        sound_group = QGroupBox("Sound")
+        sound_layout = QVBoxLayout()
+        
+        self.sound_enabled = QCheckBox("Enable sound effects")
+        self.sound_enabled.setChecked(self.parent.sound_enabled)
+        
+        self.notification_sounds = QCheckBox("Play notification sounds")
+        self.message_sounds = QCheckBox("Play message sounds")
+        self.startup_sound = QCheckBox("Play startup sound")
+        
+        sound_layout.addWidget(self.sound_enabled)
+        sound_layout.addWidget(self.notification_sounds)
+        sound_layout.addWidget(self.message_sounds)
+        sound_layout.addWidget(self.startup_sound)
+        
+        sound_group.setLayout(sound_layout)
+        layout.addWidget(sound_group)
+        
+        scroll.setWidget(notifications_widget)
+        self.tab_widget.addTab(scroll, "Notifications")
+
+    def add_privacy_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        
+        privacy_widget = QWidget()
+        layout = QVBoxLayout(privacy_widget)
+        
+        # Privacy Settings
+        privacy_group = QGroupBox("Privacy")
+        privacy_layout = QVBoxLayout()
+        
+        self.show_online = QCheckBox("Show when I'm online")
+        self.read_receipts = QCheckBox("Send read receipts")
+        self.typing_indicator = QCheckBox("Show typing indicator")
+        
+        privacy_layout.addWidget(self.show_online)
+        privacy_layout.addWidget(self.read_receipts)
+        privacy_layout.addWidget(self.typing_indicator)
+        
+        privacy_group.setLayout(privacy_layout)
+        layout.addWidget(privacy_group)
+        
+        scroll.setWidget(privacy_widget)
+        self.tab_widget.addTab(scroll, "Privacy")
+
+    # ... existing settings methods (choose_font, choose_text_color, etc.) ...
+
+    def load_current_settings(self):
+        """Load current settings into dialog"""
+        settings = self.load_settings_from_file()
+        
+        # Apply theme
+        self.theme_combo.setCurrentText(settings.get('theme', 'Light'))
+        
+        # Apply appearance settings
+        font = QFont(
+            settings.get('font_family', 'Arial'),
+            int(settings.get('font_size', '10'))
+        )
+        self.current_font = font
+        self.current_text_color = QColor(settings.get('text_color', '#000000'))
+        self.current_bg_color = QColor(settings.get('bg_color', '#ffffff'))
         
         # Update previews
         self.update_font_preview()
         self.text_color_preview.setStyleSheet(f"background-color: {self.current_text_color.name()}; border: 1px solid gray")
         self.bg_color_preview.setStyleSheet(f"background-color: {self.current_bg_color.name()}; border: 1px solid gray")
-
-    def choose_font(self):
-        font, ok = QFontDialog.getFont(self.current_font, self)
-        if ok:
-            self.current_font = font
-            self.update_font_preview()
-
-    def choose_text_color(self):
-        color = QColorDialog.getColor(self.current_text_color, self)
-        if color.isValid():
-            self.current_text_color = color
-            self.text_color_preview.setStyleSheet(f"background-color: {color.name()}; border: 1px solid gray")
-
-    def choose_bg_color(self):
-        color = QColorDialog.getColor(self.current_bg_color, self)
-        if color.isValid():
-            self.current_bg_color = color
-            self.bg_color_preview.setStyleSheet(f"background-color: {color.name()}; border: 1px solid gray")
-
-    def update_font_preview(self):
-        self.font_label.setText(f"Current Font: {self.current_font.family()} {self.current_font.pointSize()}pt")
-
-    def toggle_sound(self, state):
-        self.parent.sound_enabled = bool(state)
-
-    def apply_settings(self):
-        # Apply to main chat
-        self.parent.chat_display.setFont(self.current_font)
-        self.parent.chat_display.setTextColor(self.current_text_color)
-        palette = self.parent.chat_display.palette()
-        palette.setColor(self.parent.chat_display.backgroundRole(), self.current_bg_color)
-        self.parent.chat_display.setPalette(palette)
         
-        # Apply to private chat windows
-        for chat_window in private_chats.values():
-            chat_window.chat_display.setFont(self.current_font)
-            chat_window.chat_display.setTextColor(self.current_text_color)
-            palette = chat_window.chat_display.palette()
-            palette.setColor(chat_window.chat_display.backgroundRole(), self.current_bg_color)
-            chat_window.chat_display.setPalette(palette)
-        
-        # Save settings to text file
+        # Load checkboxes
+        self.show_timestamps.setChecked(settings.get('show_timestamps', 'true').lower() == 'true')
+        self.message_preview.setChecked(settings.get('message_preview', 'true').lower() == 'true')
+        self.auto_scroll.setChecked(settings.get('auto_scroll', 'true').lower() == 'true')
+        self.history_limit.setValue(int(settings.get('history_limit', '100')))
+        self.sound_enabled.setChecked(settings.get('sound_enabled', 'true').lower() == 'true')
+        self.notification_sounds.setChecked(settings.get('notification_sounds', 'true').lower() == 'true')
+        self.message_sounds.setChecked(settings.get('message_sounds', 'true').lower() == 'true')
+        self.startup_sound.setChecked(settings.get('startup_sound', 'true').lower() == 'true')
+        self.show_online.setChecked(settings.get('show_online', 'true').lower() == 'true')
+        self.read_receipts.setChecked(settings.get('read_receipts', 'true').lower() == 'true')
+        self.typing_indicator.setChecked(settings.get('typing_indicator', 'true').lower() == 'true')
+
+    def load_settings_from_file(self):
+        """Load settings from file with defaults"""
+        settings = DEFAULT_SETTINGS.copy()
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    for line in f:
+                        if '=' in line:
+                            key, value = line.strip().split('=', 1)
+                            settings[key] = value
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+        return settings
+
+    def save_settings(self):
+        """Save all settings to file"""
         settings = [
+            f"theme={self.theme_combo.currentText()}",
             f"font_family={self.current_font.family()}",
             f"font_size={self.current_font.pointSize()}",
             f"text_color={self.current_text_color.name()}",
             f"bg_color={self.current_bg_color.name()}",
-            f"sound_enabled={str(self.sound_enabled.isChecked()).lower()}"
+            f"sound_enabled={str(self.sound_enabled.isChecked()).lower()}",
+            f"show_timestamps={str(self.show_timestamps.isChecked()).lower()}",
+            f"message_preview={str(self.message_preview.isChecked()).lower()}",
+            f"auto_scroll={str(self.auto_scroll.isChecked()).lower()}",
+            f"history_limit={self.history_limit.value()}",
+            f"show_online={str(self.show_online.isChecked()).lower()}",
+            f"read_receipts={str(self.read_receipts.isChecked()).lower()}",
+            f"typing_indicator={str(self.typing_indicator.isChecked()).lower()}",
+            f"notification_sounds={str(self.notification_sounds.isChecked()).lower()}",
+            f"message_sounds={str(self.message_sounds.isChecked()).lower()}",
+            f"startup_sound={str(self.startup_sound.isChecked()).lower()}"
         ]
         
         try:
@@ -1185,8 +1398,47 @@ class SettingsDialog(QDialog):
                 f.write('\n'.join(settings))
         except Exception as e:
             print(f"Error saving settings: {e}")
+
+    def apply_settings(self):
+        # ...existing apply_settings code...
+        
+        # Save settings to file
+        self.save_settings()
         
         self.accept()
+
+    def preview_theme(self, theme_name):
+        """Preview the selected theme"""
+        if theme_name in THEMES:
+            QApplication.instance().setStyleSheet(THEMES[theme_name]["style"])
+
+    def choose_font(self):
+        """Choose new font"""
+        font, ok = QFontDialog.getFont(self.current_font, self)
+        if ok:
+            self.current_font = font
+            self.update_font_preview()
+
+    def choose_text_color(self):
+        """Choose new text color"""
+        color = QColorDialog.getColor(self.current_text_color, self)
+        if color.isValid():
+            self.current_text_color = color
+            self.text_color_preview.setStyleSheet(
+                f"background-color: {color.name()}; border: 1px solid gray")
+
+    def choose_bg_color(self):
+        """Choose new background color"""
+        color = QColorDialog.getColor(self.current_bg_color, self)
+        if color.isValid():
+            self.current_bg_color = color
+            self.bg_color_preview.setStyleSheet(
+                f"background-color: {color.name()}; border: 1px solid gray")
+
+    def update_font_preview(self):
+        """Update font preview label"""
+        self.font_label.setText(
+            f"Current Font: {self.current_font.family()} {self.current_font.pointSize()}pt")
 
 class FriendsDialog(QDialog):
     def __init__(self, parent=None):
@@ -1307,6 +1559,10 @@ class FriendsDialog(QDialog):
 
 def main():
     app = QApplication(sys.argv)
+    
+    # Apply initial theme (Light theme by default)
+    app.setStyle("Fusion")
+    app.setStyleSheet(THEMES["Light"]["style"])
     
     # Check for updates before showing any windows
     check_for_updates()
