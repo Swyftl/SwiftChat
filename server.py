@@ -1,9 +1,13 @@
+# Replace tkinter imports with PyQt6
 import socket
 import threading
 import os
 import sqlite3
-import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                            QHBoxLayout, QLabel, QLineEdit, QPushButton, 
+                            QTextEdit, QMessageBox, QScrollArea)
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtGui import QTextCursor
 import select
 from datetime import datetime
 import time
@@ -16,6 +20,7 @@ import webbrowser
 import sys
 import subprocess
 from encryption import E2EEncryption
+from themes import THEMES  # Import themes for consistent look
 
 # Version control constants
 CURRENT_VERSION = "V0.2.3"
@@ -37,12 +42,14 @@ def check_for_updates():
             print(f"Latest version: {latest_version}")
             
             if latest_version > CURRENT_VERSION:
-                if messagebox.askyesno(
+                if QMessageBox.question(
+                    None,
                     "Server Update Available",
                     f"A new server version ({latest_version}) is available!\n"
                     f"You are currently running version {CURRENT_VERSION}\n\n"
-                    "Would you like to download and install the update?"
-                ):
+                    "Would you like to download and install the update?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                ) == QMessageBox.StandardButton.Yes:
                     for asset in latest_release['assets']:
                         if asset['name'].lower() == 'swiftchatserver.exe':
                             try:
@@ -65,9 +72,8 @@ def check_for_updates():
                                         f.write(f'move /Y "{temp_exe}" "{current_exe}"\n')
                                         f.write(f'start "" "{current_exe}"\n')
                                         f.write('del "%~f0"\n')
-
-                                    # Start update script and exit
-                                    messagebox.showinfo(
+                                    QMessageBox.information(
+                                        None,
                                         "Update Ready",
                                         "Update downloaded successfully!\n"
                                         "The server will now restart to complete the update."
@@ -76,7 +82,8 @@ def check_for_updates():
                                     os._exit(0)
                             except Exception as e:
                                 print(f"Error during update: {e}")
-                                messagebox.showerror(
+                                QMessageBox.critical(
+                                    None,
                                     "Update Error",
                                     f"Failed to download update: {str(e)}"
                                 )
@@ -127,25 +134,46 @@ def load_config():
     
     return config
 
-class ServerGUI:
+class ServerGUI(QMainWindow):
     def __init__(self):
-        # Check for updates before starting
-        check_for_updates()
+        super().__init__()
+        self.setWindowTitle("SwiftChat Server")
+        self.resize(800, 600)
         
-        # Create directories if they don't exist
-        for dir in ['logs', 'images']:
-            if not os.path.exists(dir):
-                os.makedirs(dir)
+        # Create central widget and layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
         
-        self.log_contents = []  # Store log messages
-        self.root = tk.Tk()
-        self.root.title("ChatApp Server")
-        self.root.geometry("800x600")
+        # Create log display
+        self.log_display = QTextEdit()
+        self.log_display.setReadOnly(True)
+        layout.addWidget(self.log_display)
         
-        # Load configuration
+        # Create status bar
+        self.status_label = QLabel("Server Status: Starting...")
+        self.status_label.setStyleSheet("color: orange")
+        layout.addWidget(self.status_label)
+        
+        # Create command input area
+        command_layout = QHBoxLayout()
+        self.command_input = QLineEdit()
+        self.command_input.returnPressed.connect(self.process_command)
+        execute_button = QPushButton("Execute")
+        execute_button.clicked.connect(self.process_command)
+        help_button = QPushButton("Help")
+        help_button.clicked.connect(self.show_command_help)
+        
+        command_layout.addWidget(self.command_input)
+        command_layout.addWidget(execute_button)
+        command_layout.addWidget(help_button)
+        layout.addLayout(command_layout)
+        
+        # Initialize server properties
+        self.log_contents = []
         self.config = load_config()
         
-        # Convert config values to appropriate types
+        # Convert config values
         self.message_history_limit = int(self.config['MESSAGE_HISTORY_LIMIT'])
         self.pm_history_limit = int(self.config['PM_HISTORY_LIMIT'])
         self.max_image_size = int(self.config['MAX_IMAGE_SIZE'])
@@ -166,57 +194,72 @@ class ServerGUI:
         for dir_path in [self.logs_path, self.images_path]:
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
-
+        
         # Start auto-backup timer if enabled
         if self.auto_backup_interval > 0:
             self.backup_timer = threading.Timer(self.auto_backup_interval, self.backup_database)
             self.backup_timer.daemon = True
             self.backup_timer.start()
         
-        # Log display
-        self.log_display = scrolledtext.ScrolledText(self.root, state=tk.DISABLED)
-        self.log_display.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
-        
-        # Server status
-        self.status_label = tk.Label(self.root, text="Server Status: Starting...", fg="orange")
-        self.status_label.pack(pady=5)
-        
-        # Add command frame
-        command_frame = tk.Frame(self.root)
-        command_frame.pack(fill=tk.X, padx=20, pady=5)
-        
-        # Command entry
-        self.command_entry = tk.Entry(command_frame)
-        self.command_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.command_entry.bind('<Return>', self.process_command)
-        
-        # Execute button
-        execute_button = tk.Button(command_frame, text="Execute", command=self.process_command)
-        execute_button.pack(side=tk.RIGHT, padx=5)
-        
-        # Command help button
-        help_button = tk.Button(command_frame, text="Help", command=self.show_command_help)
-        help_button.pack(side=tk.RIGHT, padx=5)
+        # Apply theme
+        self.apply_theme("Light")  # Default theme
         
         # Start server in separate thread
         threading.Thread(target=self.run_server, daemon=True).start()
         
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.root.mainloop()
-    
+        # Set up window close handling
+        self.setup_close_handler()
+
+    def apply_theme(self, theme_name):
+        """Apply a theme to the server GUI"""
+        if theme_name in THEMES:
+            self.setStyleSheet(THEMES[theme_name]["style"])
+
     def log(self, message):
+        """Add message to log display"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"[{timestamp}] {message}"
         
         # Store in memory
         self.log_contents.append(log_entry)
         
-        # Display in GUI
-        self.log_display.config(state=tk.NORMAL)
-        self.log_display.insert(tk.END, log_entry + "\n")
-        self.log_display.yview(tk.END)
-        self.log_display.config(state=tk.DISABLED)
-    
+        # Add to display
+        self.log_display.append(log_entry)
+        
+        # Auto-scroll to bottom
+        cursor = self.log_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.log_display.setTextCursor(cursor)
+
+    def setup_close_handler(self):
+        """Set up proper window close handling"""
+        self.closeEvent = self.handle_close
+
+    def handle_close(self, event):
+        """Handle window close event"""
+        reply = QMessageBox.question(
+            self, 'Confirm Exit',
+            'Are you sure you want to shut down the server?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.on_closing()
+            event.accept()
+        else:
+            event.ignore()
+
+    def on_closing(self):
+        """Clean up resources before closing"""
+        self.log("Shutting down server...")
+        self.save_log()
+        try:
+            self.server.close()
+        except:
+            pass
+        QApplication.quit()
+
     def save_log(self):
         timestamp = datetime.now().strftime("%d%m%Y_%H%M%S")
         filename = f"logs/server_{timestamp}.log"
@@ -227,16 +270,6 @@ class ServerGUI:
             self.log(f"Log saved to {filename}")
         except Exception as e:
             self.log(f"Error saving log: {str(e)}")
-    
-    def on_closing(self):
-        self.log("Shutting down server...")
-        self.save_log()
-        try:
-            self.server.close()
-        except:
-            pass
-        self.root.destroy()
-        os._exit(0)
     
     def backup_database(self):
         """Backup the database periodically"""
@@ -262,7 +295,8 @@ class ServerGUI:
                 f.write("CHATAPP_HOST=127.0.0.1\nCHATAPP_PORT=8080")
             self.log("Created conf.env with default settings.")
             self.log("Please review the configuration file and restart the server.")
-            self.status_label.config(text="Server Status: Configuration Created", fg="orange")
+            self.status_label.setText("Server Status: Configuration Created")
+            self.status_label.setStyleSheet("color: orange")
             return
 
         # Database setup
@@ -311,7 +345,8 @@ class ServerGUI:
         self.server.bind((HOST, PORT))
         self.server.listen()
         
-        self.status_label.config(text=f"Server Status: Running on {HOST}:{PORT}", fg="green")
+        self.status_label.setText(f"Server Status: Running on {HOST}:{PORT}")
+        self.status_label.setStyleSheet("color: green")
         self.log(f"Server is listening on {HOST}:{PORT}")
 
         self.clients = []
@@ -797,8 +832,8 @@ class ServerGUI:
 
     def process_command(self, event=None):
         """Process server commands"""
-        command = self.command_entry.get().strip()
-        self.command_entry.delete(0, tk.END)
+        command = self.command_input.text().strip()
+        self.command_input.clear()
         
         if not command:
             return
@@ -904,5 +939,20 @@ help                   - Show this help message
         else:
             self.log(f"User not found: {username}")
 
+def main():
+    app = QApplication(sys.argv)
+    
+    # Apply Fusion style for better cross-platform look
+    app.setStyle("Fusion")
+    
+    # Check for updates
+    check_for_updates()
+    
+    # Create and show the server GUI
+    server = ServerGUI()
+    server.show()
+    
+    return app.exec()
+
 if __name__ == "__main__":
-    ServerGUI()
+    sys.exit(main())
